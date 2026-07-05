@@ -31,10 +31,8 @@ main = 'packages/apps/workers-mk2/dist/index.js'   # Default use of dist/index.j
 # preview_id is only used for debugging, please delete if not needed
 # If you want to know how to obtain the ID of kv_namespaces, please check here.
 # https://github.com/TBXark/ChatGPT-Telegram-Workers/blob/master/doc/en/DEPLOY.md
-kv_namespaces = [
-  { binding = 'DATABASE', id = '', preview_id = '' }
-]
 
+#kvm here
 
 [vars]
 # More parameters usage, please see https://github.com/TBXark/ChatGPT-Telegram-Workers/blob/master/doc/en/CONFIG.md
