@@ -5,7 +5,7 @@ compatibility_date = "2024-11-11"
 compatibility_flags = ["nodejs_compat_v2"]
 
 # Deploy dist
-main = './dist/index.js'   # Default use of dist/index.js
+main = 'packages/apps/workers-mk2/dist/index.js'   # Default use of dist/index.js
 
 # Deploy Core version
 # > pnpm run deploy:workers
