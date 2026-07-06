@@ -1999,6 +1999,87 @@ async function requestCompletionsFromLLM(params, context, agent, modifier, onStr
   }
   if (!params) {
     throw new Error("Message is empty");
+      // --- התחלת קוד חיפוש רשת (Tavily Proxy via MCP) ---
+  if (params && params.content && typeof params.content === "string" && params.content.startsWith('/search ')) {
+    const query = params.content.replace('/search ', '');
+    const chatId = params.chat_id || (context.SHARE_CONTEXT && context.SHARE_CONTEXT.chatId);
+    const currentEnv = context.ENV || (context.SHARE_CONTEXT && context.SHARE_CONTEXT.ENV);
+
+    if (chatId && currentEnv) {
+      // 1. שליחת הודעת ביניים מהירה לטלגרם כדי לסגור את ה-Webhook מיידית
+      await fetch(`https://telegram.org{currentEnv.TELEGRAM_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: "שנייה, אני בודק באינטרנט... 🔍" })
+      });
+
+      // 2. הפעלת משימת הרקע באוויר בצורה תואמת ל-tbxark runtime
+      const workerCtx = context.runtime && context.runtime.ctx;
+      if (workerCtx && typeof workerCtx.waitUntil === "function") {
+        workerCtx.waitUntil((async () => {
+            try {
+                // קריאה לוורקר של טבילי
+                const tResponse = await fetch(`${currentEnv.TAVILY_PROXY_URL}/mcp`, {
+                    method: "POST",
+                    headers: { 
+                        "Content-Type": "application/json",
+                        "x-api-key": currentEnv.TAVILY_AUTH_KEY 
+                    },
+                    body: JSON.stringify({
+                        method: "tools/call",
+                        params: {
+                            name: "tavily-search",
+                            arguments: { query: query }
+                        }
+                    })
+                });
+
+                const tData = await tResponse.json();
+                let resultsText = (tData && tData.result && tData.result.content) ? tData.result.content.text : "לא נמצאו תוצאות.";
+
+                // פנייה ל-LLM המקורי של הבוט עם תוצאות החיפוש המוזרקות
+                const searchLlmParams = {
+                    prompt: "You are a helpful assistant. Use the provided web search results to answer the user's question accurately in Hebrew.",
+                    messages: [
+                        ...history,
+                        { role: "system", content: `Web Search Results:\n${resultsText}` },
+                        { role: "user", content: query }
+                    ]
+                };
+
+                const { text: finalAnswer } = await agent.request(searchLlmParams, context.USER_CONFIG);
+
+                // שליחת התשובה הסופית לטלגרם
+                await fetch(`https://telegram.org{currentEnv.TELEGRAM_TOKEN}/sendMessage`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        text: `🌐 *תשובה מעודכנת מהרשת:*\n\n${finalAnswer}`,
+                        parse_mode: "Markdown"
+                    })
+                });
+
+            } catch (error) {
+                await fetch(`https://telegram.org{currentEnv.TELEGRAM_TOKEN}/sendMessage`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ chat_id: chatId, text: "❌ מצטער, אירעה שגיאה בעיבוד נתוני החיפוש ברקע." })
+                });
+            }
+        })());
+
+        return new Response("OK", { status: 200 });
+      }
+    }
+  }
+  // --- סיום קוד חיפוש רשת ---
+
+  const llmParams = {
+    prompt: context.USER_CONFIG.SYSTEM_INIT_MESSAGE || void 0,
+    messages: [...history, params]
+  };
+
   }
   const llmParams = {
     prompt: context.USER_CONFIG.SYSTEM_INIT_MESSAGE || void 0,
