@@ -20,7 +20,7 @@ export interface Env {
   AI_PROVIDER?: string;
 }
 
-// מפת המודלים הנתמכים בתפריט המובנה
+// mcp-proxy - מפת המודלים הנתמכים בתפריט המובנה
 const PROVIDERS: any = {
   gemini: {
     name: "Google Gemini 🤖",
@@ -301,16 +301,15 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${authKey}`,
+        "x-api-key": authKey, // תיקון מפתח האבטחה ל-x-api-key התואם את מפרט ה-Proxy
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
         method: "tools/call",
         params: {
-          name: "tavily_search",
+          name: "tavily-search", // תיקון שם הכלי ל-tavily-search עם מקף אמצעי
           arguments: {
-            query: query,
-            search_depth: "advanced"
+            query: query
           }
         },
         id: 1
