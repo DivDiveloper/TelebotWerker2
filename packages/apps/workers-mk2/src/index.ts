@@ -1,4 +1,4 @@
-// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה קצרה ומאובטחת /balance)
+// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה קצרה ומאובטחת /balance + הדפסת שגיאות מפורטת)
 
 // פתרון שגיאות קומפילציה של TypeScript עבור סביבות ללא הגדרות גלובליות של Cloudflare
 type KVNamespace = any;
@@ -121,7 +121,7 @@ class GroqConfig {
   GROQ_API_KEY = null;
   GROQ_API_BASE = "https://api.groq.com/openai/v1";
   GROQ_CHAT_MODEL = "groq-chat";
-  GROQ_CHAT_MODELS_LIST = "";
+  GROQ_CHAT_MODELS_LIST = ""; // תוקן לאותיות גדולות למניעת בעיות זיהוי
   GROQ_CHAT_EXTRA_PARAMS = {};
 }
 
@@ -317,7 +317,8 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
     });
 
     if (!response.ok) {
-      return `שגיאה בפנייה לשרת החיפוש: ${response.statusText}`;
+      const errBody = await response.text(); // חילוץ גוף השגיאה המלא לדיבוג באונליין
+      return `שגיאה בפנייה לשרת החיפוש: ${response.status} - ${errBody}`;
     }
 
     const reader = response.body?.getReader();
@@ -557,7 +558,7 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
       history = history.slice(history.length - envConfig.MAX_HISTORY_LENGTH);
     }
 
-    // שמירה ב-KV עם הגדרת TTL של 24 שעות (86400 שניות) למניעת הצטברות זבל
+    // שמירה ב-KV WITH TTL של 24 שעות למניעת זבל
     await env.DATABASE.put(`history_${chatId}`, JSON.stringify(history), { expirationTtl: 86400 });
 
     // עדכון הודעת הביניים או שליחת הודעה חדשה
@@ -749,4 +750,29 @@ export default {
           }
           
           const res = await searchService.fetch("http://searchworker/api/keys", { 
-            headers: { "x-api-key": env.TAVILY_PROXY_AUTH_
+            headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" } 
+          });
+          const keys: any = await res.json();
+          const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.credits || 0).toLocaleString()}*`).join("\n");
+          
+          await sendTelegramMessage(chatId, msg, token);
+          return new Response("OK", { status: 200 });
+        }
+
+        if (!text) {
+          return new Response("OK", { status: 200 });
+        }
+
+        // עבור הודעות שיחה רגילות, מריצים את עיבוד המודל והחיפוש בצורה אסינכרונית ברקע
+        ctx.waitUntil(handleMessageAndReply(chatId, text, env));
+        return new Response("OK", { status: 200 });
+      }
+
+    } catch (err: any) {
+      console.error("Worker Global Error:", err);
+      return new Response("OK", { status: 200 });
+    }
+
+    return new Response("OK", { status: 200 });
+  }
+};
