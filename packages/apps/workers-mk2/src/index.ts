@@ -1,4 +1,4 @@
-// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models עם סינון דינמי)
+// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה קצרה ומאובטחת /balance)
 
 // פתרון שגיאות קומפילציה של TypeScript עבור סביבות ללא הגדרות גלובליות של Cloudflare
 type KVNamespace = any;
@@ -301,13 +301,13 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": authKey, // תיקון מפתח האבטחה ל-x-api-key התואם את מפרט ה-Proxy
+        "x-api-key": authKey, // מפתח האבטחה המאושר
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
         method: "tools/call",
         params: {
-          name: "tavily_search", // תיקון שם הכלי ל-tavily-search עם מקף אמצעי
+          name: "tavily_search", // שימוש בקו תחתון התואם את מפרט ה-Proxy הפיזי
           arguments: {
             query: query
           }
@@ -707,6 +707,7 @@ export default {
             "שלום! אני בוט הכל-יכול שלך. 🤖✨\n\n" +
             "פקודות זמינות לשימוש:\n" +
             "⚙️ /models - תפריט בחירה והחלפת מודלים\n" +
+            "📊 /balance - בדיקת יתרת קרדיטים ב-Tavily API\n" +
             "🔍 /neton - הפעלת מצב חיפוש באינטרנט\n" +
             "💬 /netoff - כיבוי מצב חיפוש וחזרה לשיחה רגילה\n" +
             "🧹 /clear או /reset - איפוס מיידי של היסטוריית השיחה הנוכחית";
@@ -739,20 +740,13 @@ export default {
           return new Response("OK", { status: 200 });
         }
 
-        if (!text) {
-          return new Response("OK", { status: 200 });
-        }
-
-        // עבור הודעות שיחה רגילות, מריצים את עיבוד המודל והחיפוש בצורה אסינכרונית ברקע
-        ctx.waitUntil(handleMessageAndReply(chatId, text, env));
-        return new Response("OK", { status: 200 });
-      }
-
-    } catch (err: any) {
-      console.error("Worker Global Error:", err);
-      return new Response("OK", { status: 200 });
-    }
-
-    return new Response("OK", { status: 200 });
-  }
-};
+        // פקודת בדיקת יתרת קרדיטים קצרה ומאובטחת (אפשרות ב')
+        if (text === "/balance") {
+          const searchService = env.SEARCH_SERVICE;
+          if (!searchService) {
+            await sendTelegramMessage(chatId, "⚠️ **שגיאה:** שירות החיפוש (`SEARCH_SERVICE`) אינו מחובר לבוט הראשי.", token);
+            return new Response("OK", { status: 200 });
+          }
+          
+          const res = await searchService.fetch("http://searchworker/api/keys", { 
+            headers: { "x-api-key": env.TAVILY_PROXY_AUTH_
