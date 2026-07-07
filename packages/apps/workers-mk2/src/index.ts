@@ -307,7 +307,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
         jsonrpc: "2.0",
         method: "tools/call",
         params: {
-          name: "tavily-search", // תיקון שם הכלי ל-tavily-search עם מקף אמצעי
+          name: "tavily_search", // תיקון שם הכלי ל-tavily-search עם מקף אמצעי
           arguments: {
             query: query
           }
