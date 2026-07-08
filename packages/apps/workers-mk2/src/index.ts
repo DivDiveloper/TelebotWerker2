@@ -1,28 +1,19 @@
-// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
-
-// פתרון שגיאות קומפילציה של TypeScript עבור סביבות ללא הגדרות גלובליות של Cloudflare
-type KVNamespace = any;
-type Fetcher = any;
+// index.js - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
+//
+// ==========================================
+// עדכוני תיקון (MCP fixes):
+// 1. שם הכלי תוקן מ-"tavily_search" ל-"tavily-search" (התאמה מדויקת לשם הרשום בשרת ה-MCP).
+// 2. ה-Accept header בקריאה ל-/mcp כולל כעת "application/json, text/event-stream" יחד,
+//    כפי שדורש StreamableHTTPServerTransport - אחרת השרת מחזיר 400 לפני שמגיע ל-handler.
+// 3. fetchWebSearch תומך גם בתשובת JSON רגילה וגם בתשובת SSE (data: ...), בהתאם ל-content-type.
+// 4. נוסף AbortController עם timeout של 20 שניות כדי למנוע תקיעה שקטה ("מחפש מידע..." בלי מענה).
+// 5. טיפול שגיאות מורחב לאורך כל fetchWebSearch כדי שהמשתמש תמיד יקבל הודעה ברורה.
+// ==========================================
 
 // ==========================================
-// 1. הגדרות טיפוסים (Types & Interfaces)
+// 1. מפת המודלים הנתמכים בתפריט המובנה
 // ==========================================
-export interface Env {
-  DATABASE: KVNamespace;
-  SEARCH_SERVICE?: Fetcher; // Service Binding לוורקר החיפוש
-  
-  // משתני סביבה ראשיים
-  TELEGRAM_BOT_TOKEN?: string;
-  GEMINI_API_KEY?: string;
-  GOOGLE_API_KEY?: string;
-  OPENAI_API_KEY?: string;
-  COHERE_API_KEY?: string; // מפתח האבטחה עבור Cohere
-  TAVILY_PROXY_AUTH_KEY?: string;
-  AI_PROVIDER?: string;
-}
-
-// mcp-proxy - מפת המודלים הנתמכים בתפריט המובנה
-const PROVIDERS: any = {
+const PROVIDERS = {
   gemini: {
     name: "Google Gemini 🤖",
     models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"]
@@ -41,158 +32,186 @@ const PROVIDERS: any = {
 // 2. מחלקות ההגדרה המקוריות של הפרויקט
 // ==========================================
 class AgentShareConfig {
-  AI_PROVIDER = "auto";
-  AI_IMAGE_PROVIDER = "auto";
-  SYSTEM_INIT_MESSAGE = null;
+  constructor() {
+    this.AI_PROVIDER = "auto";
+    this.AI_IMAGE_PROVIDER = "auto";
+    this.SYSTEM_INIT_MESSAGE = null;
+  }
 }
 
 class OpenAIConfig {
-  OPENAI_API_KEY = [];
-  OPENAI_CHAT_MODEL = "gpt-4o-mini";
-  OPENAI_API_BASE = "https://api.openai.com/v1";
-  OPENAI_API_EXTRA_PARAMS = {};
-  OPENAI_CHAT_MODELS_LIST = "";
+  constructor() {
+    this.OPENAI_API_KEY = [];
+    this.OPENAI_CHAT_MODEL = "gpt-4o-mini";
+    this.OPENAI_API_BASE = "https://api.openai.com/v1";
+    this.OPENAI_API_EXTRA_PARAMS = {};
+    this.OPENAI_CHAT_MODELS_LIST = "";
+  }
 }
 
 class DallEConfig {
-  DALL_E_MODEL = "dall-e-3";
-  DALL_E_IMAGE_SIZE = "1024x1024";
-  DALL_E_IMAGE_QUALITY = "standard";
-  DALL_E_IMAGE_STYLE = "vivid";
-  DALL_E_MODELS_LIST = '["dall-e-3"]';
+  constructor() {
+    this.DALL_E_MODEL = "dall-e-3";
+    this.DALL_E_IMAGE_SIZE = "1024x1024";
+    this.DALL_E_IMAGE_QUALITY = "standard";
+    this.DALL_E_IMAGE_STYLE = "vivid";
+    this.DALL_E_MODELS_LIST = '["dall-e-3"]';
+  }
 }
 
 class AzureConfig {
-  AZURE_API_KEY = null;
-  AZURE_RESOURCE_NAME = null;
-  AZURE_CHAT_MODEL = "gpt-4o-mini";
-  AZURE_IMAGE_MODEL = "dall-e-3";
-  AZURE_API_VERSION = "2024-06-01";
-  AZURE_CHAT_MODELS_LIST = "";
-  AZURE_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.AZURE_API_KEY = null;
+    this.AZURE_RESOURCE_NAME = null;
+    this.AZURE_CHAT_MODEL = "gpt-4o-mini";
+    this.AZURE_IMAGE_MODEL = "dall-e-3";
+    this.AZURE_API_VERSION = "2024-06-01";
+    this.AZURE_CHAT_MODELS_LIST = "";
+    this.AZURE_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class WorkersConfig {
-  CLOUDFLARE_ACCOUNT_ID = null;
-  CLOUDFLARE_TOKEN = null;
-  WORKERS_CHAT_MODEL = "@cf/qwen/qwen1.5-7b-chat-awq";
-  WORKERS_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
-  WORKERS_CHAT_MODELS_LIST = "";
-  WORKERS_IMAGE_MODELS_LIST = "";
-  WORKERS_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.CLOUDFLARE_ACCOUNT_ID = null;
+    this.CLOUDFLARE_TOKEN = null;
+    this.WORKERS_CHAT_MODEL = "@cf/qwen/qwen1.5-7b-chat-awq";
+    this.WORKERS_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
+    this.WORKERS_CHAT_MODELS_LIST = "";
+    this.WORKERS_IMAGE_MODELS_LIST = "";
+    this.WORKERS_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class GeminiConfig {
-  GOOGLE_API_KEY = null;
-  GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
-  GOOGLE_CHAT_MODEL = "gemini-2.5-flash"; // מודל ברירת מחדל עדכני ותקין
-  GOOGLE_CHAT_MODELS_LIST = "";
-  GOOGLE_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.GOOGLE_API_KEY = null;
+    this.GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+    this.GOOGLE_CHAT_MODEL = "gemini-2.5-flash"; // מודל ברירת מחדל עדכני ותקין
+    this.GOOGLE_CHAT_MODELS_LIST = "";
+    this.GOOGLE_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class MistralConfig {
-  MISTRAL_API_KEY = null;
-  MISTRAL_API_BASE = "https://api.mistral.ai/v1";
-  MISTRAL_CHAT_MODEL = "mistral-tiny";
-  MISTRAL_CHAT_MODELS_LIST = "";
-  MISTRAL_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.MISTRAL_API_KEY = null;
+    this.MISTRAL_API_BASE = "https://api.mistral.ai/v1";
+    this.MISTRAL_CHAT_MODEL = "mistral-tiny";
+    this.MISTRAL_CHAT_MODELS_LIST = "";
+    this.MISTRAL_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class CohereConfig {
-  COHERE_API_KEY = null;
-  COHERE_API_BASE = "https://api.cohere.com/v2";
-  COHERE_CHAT_MODEL = "command-r-plus";
-  COHERE_CHAT_MODELS_LIST = "";
-  COHERE_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.COHERE_API_KEY = null;
+    this.COHERE_API_BASE = "https://api.cohere.com/v2";
+    this.COHERE_CHAT_MODEL = "command-r-plus";
+    this.COHERE_CHAT_MODELS_LIST = "";
+    this.COHERE_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class AnthropicConfig {
-  ANTHROPIC_API_KEY = null;
-  ANTHROPIC_API_BASE = "https://api.anthropic.com/v1";
-  ANTHROPIC_CHAT_MODEL = "claude-3-5-haiku-latest";
-  ANTHROPIC_CHAT_MODELS_LIST = "";
-  ANTHROPIC_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.ANTHROPIC_API_KEY = null;
+    this.ANTHROPIC_API_BASE = "https://api.anthropic.com/v1";
+    this.ANTHROPIC_CHAT_MODEL = "claude-3-5-haiku-latest";
+    this.ANTHROPIC_CHAT_MODELS_LIST = "";
+    this.ANTHROPIC_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class DeepSeekConfig {
-  DEEPSEEK_API_KEY = null;
-  DEEPSEEK_API_BASE = "https://api.deepseek.com";
-  DEEPSEEK_CHAT_MODEL = "deepseek-chat";
-  DEEPSEEK_CHAT_MODELS_LIST = "";
-  DEEPSEEK_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.DEEPSEEK_API_KEY = null;
+    this.DEEPSEEK_API_BASE = "https://api.deepseek.com";
+    this.DEEPSEEK_CHAT_MODEL = "deepseek-chat";
+    this.DEEPSEEK_CHAT_MODELS_LIST = "";
+    this.DEEPSEEK_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class GroqConfig {
-  GROQ_API_KEY = null;
-  GROQ_API_BASE = "https://api.groq.com/openai/v1";
-  GROQ_CHAT_MODEL = "groq-chat";
-  GROQ_CHAT_MODELS_LIST = ""; // תוקן לאותיות גדולות למניעת בעיות זיהוי
-  GROQ_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.GROQ_API_KEY = null;
+    this.GROQ_API_BASE = "https://api.groq.com/openai/v1";
+    this.GROQ_CHAT_MODEL = "groq-chat";
+    this.GROQ_CHAT_MODELS_LIST = ""; // תוקן לאותיות גדולות למניעת בעיות זיהוי
+    this.GROQ_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class XAIConfig {
-  XAI_API_KEY = null;
-  XAI_API_BASE = "https://api.x.ai/v1";
-  XAI_CHAT_MODEL = "grok-2-latest";
-  XAI_CHAT_MODELS_LIST = "";
-  XAI_CHAT_EXTRA_PARAMS = {};
+  constructor() {
+    this.XAI_API_KEY = null;
+    this.XAI_API_BASE = "https://api.x.ai/v1";
+    this.XAI_CHAT_MODEL = "grok-2-latest";
+    this.XAI_CHAT_MODELS_LIST = "";
+    this.XAI_CHAT_EXTRA_PARAMS = {};
+  }
 }
 
 class DefineKeys {
-  DEFINE_KEYS = [];
+  constructor() {
+    this.DEFINE_KEYS = [];
+  }
 }
 
 class EnvironmentConfig {
-  LANGUAGE = "he"; // עברית כברירת מחדל
-  UPDATE_BRANCH = "master";
-  CHAT_COMPLETE_API_TIMEOUT = 0;
-  TELEGRAM_API_DOMAIN = "https://api.telegram.org";
-  TELEGRAM_AVAILABLE_TOKENS = [];
-  DEFAULT_PARSE_MODE = "Markdown";
-  TELEGRAM_MIN_STREAM_INTERVAL = 0;
-  TELEGRAM_PHOTO_SIZE_OFFSET = 1;
-  TELEGRAM_IMAGE_TRANSFER_MODE = "base64";
-  MODEL_LIST_COLUMNS = 1;
-  I_AM_A_GENEROUS_PERSON = false;
-  CHAT_WHITE_LIST = [];
-  LOCK_USER_CONFIG_KEYS = [
-    "OPENAI_API_BASE",
-    "GOOGLE_API_BASE",
-    "MISTRAL_API_BASE",
-    "COHERE_API_BASE",
-    "ANTHROPIC_API_BASE",
-    "DEEPSEEK_API_BASE",
-    "GROQ_API_BASE",
-    "XAI_API_BASE"
-  ];
-  TELEGRAM_BOT_NAME = [];
-  CHAT_GROUP_WHITE_LIST = [];
-  GROUP_CHAT_BOT_ENABLE = true;
-  GROUP_CHAT_BOT_SHARE_MODE = true;
-  AUTO_TRIM_HISTORY = true;
-  MAX_HISTORY_LENGTH = 8; // מגבלת זיכרון יעילה
-  MAX_TOKEN_LENGTH = -1;
-  HISTORY_IMAGE_PLACEHOLDER = null;
-  HIDE_COMMAND_BUTTONS = [];
-  SHOW_REPLY_BUTTON = false;
-  EXTRA_MESSAGE_CONTEXT = false;
-  EXTRA_MESSAGE_MEDIA_COMPATIBLE = ["image"];
-  STREAM_MODE = false;
-  SAFE_MODE = true;
-  DEBUG_MODE = false;
-  DEV_MODE = false;
+  constructor() {
+    this.LANGUAGE = "he"; // עברית כברירת מחדל
+    this.UPDATE_BRANCH = "master";
+    this.CHAT_COMPLETE_API_TIMEOUT = 0;
+    this.TELEGRAM_API_DOMAIN = "https://api.telegram.org";
+    this.TELEGRAM_AVAILABLE_TOKENS = [];
+    this.DEFAULT_PARSE_MODE = "Markdown";
+    this.TELEGRAM_MIN_STREAM_INTERVAL = 0;
+    this.TELEGRAM_PHOTO_SIZE_OFFSET = 1;
+    this.TELEGRAM_IMAGE_TRANSFER_MODE = "base64";
+    this.MODEL_LIST_COLUMNS = 1;
+    this.I_AM_A_GENEROUS_PERSON = false;
+    this.CHAT_WHITE_LIST = [];
+    this.LOCK_USER_CONFIG_KEYS = [
+      "OPENAI_API_BASE",
+      "GOOGLE_API_BASE",
+      "MISTRAL_API_BASE",
+      "COHERE_API_BASE",
+      "ANTHROPIC_API_BASE",
+      "DEEPSEEK_API_BASE",
+      "GROQ_API_BASE",
+      "XAI_API_BASE"
+    ];
+    this.TELEGRAM_BOT_NAME = [];
+    this.CHAT_GROUP_WHITE_LIST = [];
+    this.GROUP_CHAT_BOT_ENABLE = true;
+    this.GROUP_CHAT_BOT_SHARE_MODE = true;
+    this.AUTO_TRIM_HISTORY = true;
+    this.MAX_HISTORY_LENGTH = 8; // מגבלת זיכרון יעילה
+    this.MAX_TOKEN_LENGTH = -1;
+    this.HISTORY_IMAGE_PLACEHOLDER = null;
+    this.HIDE_COMMAND_BUTTONS = [];
+    this.SHOW_REPLY_BUTTON = false;
+    this.EXTRA_MESSAGE_CONTEXT = false;
+    this.EXTRA_MESSAGE_MEDIA_COMPATIBLE = ["image"];
+    this.STREAM_MODE = false;
+    this.SAFE_MODE = true;
+    this.DEBUG_MODE = false;
+    this.DEV_MODE = false;
 
-  // הגדרות מצב החיפוש
-  DEFAULT_NET_MODE = false;
-  NET_MODE_KEY_PREFIX = "net_mode_";
+    // הגדרות מצב החיפוש
+    this.DEFAULT_NET_MODE = false;
+    this.NET_MODE_KEY_PREFIX = "net_mode_";
+  }
 }
 
 // ==========================================
 // 3. פונקציות עזר של טלגרם (תמיכה בכפתורי Inline ומנגנון Fallback)
 // ==========================================
-async function sendTelegramMessage(chatId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
+async function sendTelegramMessage(chatId, text, token, replyMarkup) {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const payload: any = {
+  const payload = {
     chat_id: chatId,
     text: text,
     parse_mode: "Markdown",
@@ -200,14 +219,14 @@ async function sendTelegramMessage(chatId: number, text: string, token: string, 
   if (replyMarkup) {
     payload.reply_markup = replyMarkup;
   }
-  
+
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
 
-  let data: any = await response.json();
+  let data = await response.json();
 
   if (!data.ok && data.description && data.description.includes("can't find end of")) {
     console.warn("Telegram Markdown parsing failed, falling back to plain text.");
@@ -223,9 +242,9 @@ async function sendTelegramMessage(chatId: number, text: string, token: string, 
   return data;
 }
 
-async function editTelegramMessage(chatId: number, messageId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
+async function editTelegramMessage(chatId, messageId, text, token, replyMarkup) {
   const url = `https://api.telegram.org/bot${token}/editMessageText`;
-  const payload: any = {
+  const payload = {
     chat_id: chatId,
     message_id: messageId,
     text: text,
@@ -234,14 +253,14 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
   if (replyMarkup) {
     payload.reply_markup = replyMarkup;
   }
-  
+
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
 
-  let data: any = await response.json();
+  let data = await response.json();
 
   if (!data.ok && data.description && data.description.includes("can't find end of")) {
     console.warn("Telegram edit Markdown parsing failed, falling back to plain text.");
@@ -258,8 +277,8 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
 }
 
 // פונקציית עזר לחלוקת כפתורים לשורות של עד 2 כפתורים בשורה
-function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
-  const result: any[][] = [];
+function chunkButtons(buttons, chunkSize = 2) {
+  const result = [];
   for (let i = 0; i < buttons.length; i += chunkSize) {
     result.push(buttons.slice(i, i + chunkSize));
   }
@@ -267,9 +286,9 @@ function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
 }
 
 // תפריט הבית לבחירת ספק מודלים - מסונן דינמית לפי המפתחות הקיימים בסודות
-async function sendProviderMenu(chatId: number, token: string, env: Env): Promise<void> {
-  const buttons: any[] = [];
-  
+async function sendProviderMenu(chatId, token, env) {
+  const buttons = [];
+
   const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
   const hasOpenAI = !!env.OPENAI_API_KEY;
   const hasCohere = !!env.COHERE_API_KEY;
@@ -296,17 +315,17 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   };
 
   await sendTelegramMessage(
-    chatId, 
-    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:", 
-    token, 
+    chatId,
+    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
+    token,
     keyboard
   );
 }
 
 // ==========================================
-// 4. פנייה לוורקר החיפוש עם ניהול Buffer בטוח ל-SSE
+// 4. פנייה לוורקר החיפוש (MCP) - עם תמיכה ב-JSON וב-SSE + Timeout
 // ==========================================
-async function fetchWebSearch(query: string, env: Env): Promise<string> {
+async function fetchWebSearch(query, env) {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
     console.error("SEARCH_SERVICE binding is missing in environment.");
@@ -314,93 +333,101 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
   }
 
   const authKey = env.TAVILY_PROXY_AUTH_KEY || "";
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 שניות מקסימום
 
   try {
     const response = await searchService.fetch("http://searchworker/mcp", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": authKey, // מפתח האבטחה המאושר
+        // חובה לכלול את שני הסוגים - StreamableHTTPServerTransport מחזיר 400
+        // אם רק אחד מהם קיים ב-Accept header.
+        "Accept": "application/json, text/event-stream",
+        "x-api-key": authKey,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
         method: "tools/call",
         params: {
-          name: "tavily_search", // שימוש בקו תחתון התואם את מפרט ה-Proxy הפיזי
+          name: "tavily-search", // מקף - חייב להתאים בדיוק לשם הכלי הרשום בשרת ה-MCP
           arguments: {
             query: query
           }
         },
         id: 1
       }),
+      signal: controller.signal,
     });
 
+    clearTimeout(timeoutId);
+
+    const rawText = await response.text();
+
     if (!response.ok) {
-      const errBody = await response.text(); // חילוץ גוף השגיאה המלא לדיבוג באונליין
-      return `שגיאה בפנייה לשרת החיפוש: ${response.status} - ${errBody}`;
+      console.error(`[fetchWebSearch] HTTP ${response.status}: ${rawText.slice(0, 500)}`);
+      return `שגיאה בפנייה לשרת החיפוש: ${response.status} - ${rawText.slice(0, 500)}`;
     }
 
-    const reader = response.body?.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let searchResultText = "";
-    let done = false;
-    let buffer = ""; 
+    const contentType = response.headers.get("content-type") || "";
+    let jsonPayload = null;
 
-    if (reader) {
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        if (value) {
-          const chunk = decoder.decode(value, { stream: !done });
-          buffer += chunk;
-          
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith("data: ")) {
-              const dataStr = trimmed.slice(6).trim();
-              if (dataStr === "[DONE]") continue;
-              try {
-                const parsed = JSON.parse(dataStr);
-                if (parsed.result?.content?.[0]?.text) {
-                  searchResultText += parsed.result.content[0].text;
-                } else if (parsed.content?.[0]?.text) {
-                  searchResultText += parsed.content[0].text;
-                } else if (parsed.text) {
-                  searchResultText += parsed.text;
-                }
-              } catch (e) {
-                // התעלמות
-              }
-            }
+    if (contentType.includes("application/json")) {
+      // תשובת JSON חד-פעמית (stateless, ללא session)
+      try {
+        jsonPayload = JSON.parse(rawText);
+      } catch (e) {
+        return `שגיאה: לא ניתן לפענח תשובת JSON מהשרת: ${rawText.slice(0, 300)}`;
+      }
+    } else if (contentType.includes("text/event-stream")) {
+      // תשובת SSE - לחלץ את שורת ה-data האחרונה שמכילה payload תקין
+      const lines = rawText.split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          const dataStr = trimmed.slice(6).trim();
+          if (dataStr === "[DONE]") continue;
+          try {
+            jsonPayload = JSON.parse(dataStr);
+          } catch (_) {
+            // התעלמות משורות חלקיות/לא תקינות
           }
         }
       }
-      
-      if (buffer) {
-        const trimmed = buffer.trim();
-        if (trimmed.startsWith("data: ")) {
-          const dataStr = trimmed.slice(6).trim();
-          try {
-            const parsed = JSON.parse(dataStr);
-            if (parsed.result?.content?.[0]?.text) {
-              searchResultText += parsed.result.content[0].text;
-            } else if (parsed.content?.[0]?.text) {
-              searchResultText += parsed.content[0].text;
-            } else if (parsed.text) {
-              searchResultText += parsed.text;
-            }
-          } catch (e) {}
-        }
+    } else {
+      // גיבוי: ניסיון לפרש כ-JSON בכל מקרה
+      try {
+        jsonPayload = JSON.parse(rawText);
+      } catch {
+        console.error(`[fetchWebSearch] Unexpected content-type "${contentType}": ${rawText.slice(0, 300)}`);
+        return `שגיאה: תשובה לא צפויה מהשרת (content-type: ${contentType}).`;
       }
     }
 
-    return searchResultText || "לאמצאו תוצאות חיפוש רלוונטיות.";
-  } catch (error: any) {
+    if (!jsonPayload) {
+      return "שגיאה: לא הצלחתי לחלץ נתונים מתשובת שרת החיפוש.";
+    }
+
+    if (jsonPayload.error) {
+      console.error("[fetchWebSearch] MCP error:", jsonPayload.error);
+      return `שגיאת MCP: ${jsonPayload.error.message || JSON.stringify(jsonPayload.error)}`;
+    }
+
+    const textResult = jsonPayload.result?.content?.[0]?.text;
+
+    if (jsonPayload.result?.isError) {
+      return `שגיאת כלי חיפוש: ${textResult || "unknown error"}`;
+    }
+
+    return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error?.name === "AbortError") {
+      console.error("[fetchWebSearch] Timeout after 20s");
+      return "שגיאה: החיפוש נמשך יותר מדי זמן וננטש (timeout).";
+    }
     console.error("Search failed:", error);
-    return `שגיאה במהלך ביצוע החיפוש: ${error.message}`;
+    return `שגיאה במהלך ביצוע החיפוש: ${error?.message || String(error)}`;
   }
 }
 
@@ -409,7 +436,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
 // ==========================================
 
 // קריאה ל-Gemini API עם תמיכה במודל שנבחר
-async function callGemini(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+async function callGemini(systemPrompt, history, env, model) {
   const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של Gemini חסר (GEMINI_API_KEY).");
@@ -421,7 +448,7 @@ async function callGemini(systemPrompt: string, history: any[], env: Env, model:
 
   const url = `${apiBase}/models/${modelName}:generateContent?key=${apiKey}`;
 
-  const contents = history.map((msg: any) => ({
+  const contents = history.map((msg) => ({
     role: msg.role === "assistant" || msg.role === "model" ? "model" : "user",
     parts: [{ text: msg.content }]
   }));
@@ -447,7 +474,7 @@ async function callGemini(systemPrompt: string, history: any[], env: Env, model:
     throw new Error(`Gemini API Error: ${errorText}`);
   }
 
-  const data: any = await response.json();
+  const data = await response.json();
   const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!replyText) {
     throw new Error("לא התקבלה תשובה תקינה מ-Gemini.");
@@ -456,7 +483,7 @@ async function callGemini(systemPrompt: string, history: any[], env: Env, model:
 }
 
 // קריאה ל-OpenAI API עם תמיכה במודל שנבחר
-async function callOpenAI(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+async function callOpenAI(systemPrompt, history, env, model) {
   const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של OpenAI חסר (OPENAI_API_KEY).");
@@ -468,7 +495,7 @@ async function callOpenAI(systemPrompt: string, history: any[], env: Env, model:
 
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg: any) => ({
+    ...history.map((msg) => ({
       role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
       content: msg.content
     }))
@@ -492,7 +519,7 @@ async function callOpenAI(systemPrompt: string, history: any[], env: Env, model:
     throw new Error(`OpenAI API Error: ${errorText}`);
   }
 
-  const data: any = await response.json();
+  const data = await response.json();
   const replyText = data.choices?.[0]?.message?.content;
   if (!replyText) {
     throw new Error("לא התקבלה תשובה תקינה מ-OpenAI.");
@@ -501,7 +528,7 @@ async function callOpenAI(systemPrompt: string, history: any[], env: Env, model:
 }
 
 // קריאה ל-Cohere API (v2 Chat Completions Endpoint)
-async function callCohere(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+async function callCohere(systemPrompt, history, env, model) {
   const apiKey = env.COHERE_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
@@ -513,7 +540,7 @@ async function callCohere(systemPrompt: string, history: any[], env: Env, model:
 
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg: any) => ({
+    ...history.map((msg) => ({
       role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
       content: msg.content
     }))
@@ -536,8 +563,8 @@ async function callCohere(systemPrompt: string, history: any[], env: Env, model:
     throw new Error(`Cohere API Error: ${errorText}`);
   }
 
-  const data: any = await response.json();
-  
+  const data = await response.json();
+
   let replyText = "";
   if (data.message?.content) {
     if (Array.isArray(data.message.content)) {
@@ -550,12 +577,12 @@ async function callCohere(systemPrompt: string, history: any[], env: Env, model:
   if (!replyText) {
     throw new Error("לא התקבלה תשובה תקינה מ-Cohere.");
   }
-  
+
   return replyText;
 }
 
 // ניתוב חכם וחופשי לפי בחירת המשתמש (תמיכה מלאה ב-Gemini, OpenAI, Cohere)
-async function callLLM(systemPrompt: string, history: any[], env: Env, provider: string, model: string): Promise<string> {
+async function callLLM(systemPrompt, history, env, provider, model) {
   if (provider === "openai") {
     return await callOpenAI(systemPrompt, history, env, model);
   } else if (provider === "cohere") {
@@ -569,7 +596,7 @@ async function callLLM(systemPrompt: string, history: any[], env: Env, provider:
 // ==========================================
 // 6. תהליך טיפול אסינכרוני מלא ברקע (עם קריאת המודל שנבחר ב-KV)
 // ==========================================
-async function handleMessageAndReply(chatId: number, text: string, env: Env): Promise<void> {
+async function handleMessageAndReply(chatId, text, env) {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   if (!token) return;
 
@@ -590,7 +617,7 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
     const userModel = (await env.DATABASE.get(`user_model_${chatId}`)) || defaultModel;
 
     let searchResults = "";
-    let tempMessageId: number | null = null;
+    let tempMessageId = null;
 
     if (isNetOn) {
       // הודעת המתנה
@@ -604,7 +631,7 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
     }
 
     // שליפת היסטוריית השיחות
-    let history: any[] = [];
+    let history = [];
     const rawHistory = await env.DATABASE.get(`history_${chatId}`);
     if (rawHistory) {
       try {
@@ -625,7 +652,7 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
     let botReply = "";
     try {
       botReply = await callLLM(systemPrompt, history, env, userProvider, userModel);
-    } catch (error: any) {
+    } catch (error) {
       console.error("LLM Call Error:", error);
       botReply = `מצטער, חלה שגיאה בעיבוד התשובה: ${error.message}`;
     }
@@ -637,7 +664,7 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
       history = history.slice(history.length - envConfig.MAX_HISTORY_LENGTH);
     }
 
-    // שמירה ב-KV WITH TTL של 24 שעות למניעת זבל
+    // שמירה ב-KV עם TTL של 24 שעות למניעת זבל
     await env.DATABASE.put(`history_${chatId}`, JSON.stringify(history), { expirationTtl: 86400 });
 
     // עדכון הודעת הביניים או שליחת הודעה חדשה
@@ -655,7 +682,7 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
 // ==========================================
 // 7. טיפול בלחיצות כפתור Inline (Callback Query Handler)
 // ==========================================
-async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> {
+async function handleCallbackQuery(callbackQuery, env) {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   const chatId = callbackQuery.message.chat.id;
   const messageId = callbackQuery.message.message_id;
@@ -677,7 +704,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       if (!providerInfo) return;
 
       // בניית רשימת כפתורי המודלים
-      const keyboardRows = providerInfo.models.map((model: string) => {
+      const keyboardRows = providerInfo.models.map((model) => {
         return [{ text: `🤖 ${model}`, callback_data: `select_model:${provider}:${model}` }];
       });
       // הוספת כפתור "חזור" לתפריט הראשי
@@ -707,7 +734,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       let providerEmoji = "🤖";
       if (provider === "openai") providerEmoji = "⚡";
       if (provider === "cohere") providerEmoji = "🔮";
-      
+
       const providerName = PROVIDERS[provider]?.name || provider;
       await editTelegramMessage(
         chatId,
@@ -722,7 +749,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
 
     // תרחיש ג': המשתמש בחר לחזור אחורה (מציג שוב רק את הספקים שיש להם מפתח פעיל)
     else if (data === "back_to_providers") {
-      const buttons: any[] = [];
+      const buttons = [];
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
       const hasOpenAI = !!env.OPENAI_API_KEY;
       const hasCohere = !!env.COHERE_API_KEY;
@@ -746,7 +773,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       const keyboard = {
         inline_keyboard: chunkButtons(buttons, 2) // עימוד חכם
       };
-      
+
       await editTelegramMessage(
         chatId,
         messageId,
@@ -765,7 +792,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
 // 8. נקודת הכניסה של קלאודפלייר (Cloudflare Worker Handler)
 // ==========================================
 export default {
-  async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
+  async fetch(request, env, ctx) {
     if (request.method !== "POST") {
       return new Response("Bot is running!", { status: 200 });
     }
@@ -776,14 +803,14 @@ export default {
     }
 
     try {
-      const update: any = await request.json();
+      const update = await request.json();
 
       // ניתוב אסינכרוני עבור לחיצות כפתורי Inline
       if (update.callback_query) {
         ctx.waitUntil(handleCallbackQuery(update.callback_query, env));
         return new Response("OK", { status: 200 });
       }
-      
+
       // ניתוב הודעות טקסט ופקודות רגילות
       if (update.message && update.message.chat) {
         const message = update.message;
@@ -792,7 +819,7 @@ export default {
 
         // פקודות טלגרם מבוצעות סינכרונית באופן מיידי בשביל מענה מהיר של חלקיקי שניות
         if (text === "/start") {
-          const welcomeText = 
+          const welcomeText =
             "שלום! אני בוט הכל-יכול שלך. 🤖✨\n\n" +
             "פקודות זמינות לשימוש:\n" +
             "⚙️ /models - תפריט בחירה והחלפת מודלים\n" +
@@ -800,7 +827,7 @@ export default {
             "🔍 /neton - הפעלת מצב חיפוש באינטרנט\n" +
             "💬 /netoff - כיבוי מצב חיפוש וחזרה לשיחה רגילה\n" +
             "🧹 /clear או /reset - איפוס מיידי של היסטוריית השיחה הנוכחית";
-          
+
           await sendTelegramMessage(chatId, welcomeText, token);
           return new Response("OK", { status: 200 });
         }
@@ -836,9 +863,9 @@ export default {
             await sendTelegramMessage(chatId, "⚠️ **שגיאה:** שירות החיפוש (`SEARCH_SERVICE`) אינו מחובר לבוט הראשי.", token);
             return new Response("OK", { status: 200 });
           }
-          
-          const res = await searchService.fetch("http://searchworker/api/keys", { 
-            headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" } 
+
+          const res = await searchService.fetch("http://searchworker/api/keys", {
+            headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" }
           });
 
           // טיפול בטוח במקרה של כשל בפנייה ל-Proxy
@@ -848,7 +875,7 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const data: any = await res.json();
+          const data = await res.json();
           const keys = data.keys; // חילוץ רשימת המפתחות מתוך שדה keys
 
           // בדיקה שהתשובה היא אכן מערך מפתחות למניעת קריסות map
@@ -857,8 +884,8 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
-          
+          const msg = `📊 **Tavily Credits:**\n` + keys.map((k) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
+
           await sendTelegramMessage(chatId, msg, token);
           return new Response("OK", { status: 200 });
         }
@@ -872,7 +899,7 @@ export default {
         return new Response("OK", { status: 200 });
       }
 
-    } catch (err: any) {
+    } catch (err) {
       console.error("Worker Global Error:", err);
       return new Response("OK", { status: 200 });
     }
