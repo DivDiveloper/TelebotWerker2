@@ -741,7 +741,7 @@ export default {
           return new Response("OK", { status: 200 });
         }
 
-        // פקודת בדיקת יתרת קרדיטים קצרה ומאובטחת (אפשרות ב')
+        // פקודת בדיקת יתרת קרדיטים קצרה ומאובטחת (אפשרות ב' עם טיפול שגיאות מורחב)
         if (text === "/balance") {
           const searchService = env.SEARCH_SERVICE;
           if (!searchService) {
@@ -752,7 +752,22 @@ export default {
           const res = await searchService.fetch("http://searchworker/api/keys", { 
             headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" } 
           });
+
+          // טיפול בטוח במקרה של כשל בפנייה ל-Proxy
+          if (!res.ok) {
+            const errBody = await res.text();
+            await sendTelegramMessage(chatId, `⚠️ **שגיאה מה-Proxy של החיפושים:**\n\nסטטוס: \`${res.status}\`\nתשובה: \`${errBody}\``, token);
+            return new Response("OK", { status: 200 });
+          }
+
           const keys: any = await res.json();
+
+          // בדיקה שהתשובה היא אכן מערך מפתחות למניעת קריסות map
+          if (!Array.isArray(keys)) {
+            await sendTelegramMessage(chatId, `⚠️ **שגיאה:** ה-Proxy החזיר נתון שאינו תואם למבנה הנדרש.\n\nנתון גולמי: \`${JSON.stringify(keys)}\``, token);
+            return new Response("OK", { status: 200 });
+          }
+
           const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.credits || 0).toLocaleString()}*`).join("\n");
           
           await sendTelegramMessage(chatId, msg, token);
