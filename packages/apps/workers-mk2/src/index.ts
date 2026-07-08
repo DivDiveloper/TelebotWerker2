@@ -1,4 +1,4 @@
-// index.js - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
+// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
 //
 // ==========================================
 // עדכוני תיקון (MCP fixes):
@@ -10,10 +10,29 @@
 // 5. טיפול שגיאות מורחב לאורך כל fetchWebSearch כדי שהמשתמש תמיד יקבל הודעה ברורה.
 // ==========================================
 
+// פתרון שגיאות קומפילציה של TypeScript עבור סביבות ללא הגדרות גלובליות של Cloudflare
+type KVNamespace = any;
+type Fetcher = any;
+
 // ==========================================
-// 1. מפת המודלים הנתמכים בתפריט המובנה
+// 1. הגדרות טיפוסים (Types & Interfaces)
 // ==========================================
-const PROVIDERS = {
+export interface Env {
+  DATABASE: KVNamespace;
+  SEARCH_SERVICE?: Fetcher; // Service Binding לוורקר החיפוש
+  
+  // משתני סביבה ראשיים
+  TELEGRAM_BOT_TOKEN?: string;
+  GEMINI_API_KEY?: string;
+  GOOGLE_API_KEY?: string;
+  OPENAI_API_KEY?: string;
+  COHERE_API_KEY?: string; // מפתח האבטחה עבור Cohere
+  TAVILY_PROXY_AUTH_KEY?: string;
+  AI_PROVIDER?: string;
+}
+
+// mcp-proxy - מפת המודלים הנתמכים בתפריט המובנה
+const PROVIDERS: any = {
   gemini: {
     name: "Google Gemini 🤖",
     models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"]
@@ -32,6 +51,9 @@ const PROVIDERS = {
 // 2. מחלקות ההגדרה המקוריות של הפרויקט
 // ==========================================
 class AgentShareConfig {
+  AI_PROVIDER: string;
+  AI_IMAGE_PROVIDER: string;
+  SYSTEM_INIT_MESSAGE: any;
   constructor() {
     this.AI_PROVIDER = "auto";
     this.AI_IMAGE_PROVIDER = "auto";
@@ -40,6 +62,11 @@ class AgentShareConfig {
 }
 
 class OpenAIConfig {
+  OPENAI_API_KEY: any[];
+  OPENAI_CHAT_MODEL: string;
+  OPENAI_API_BASE: string;
+  OPENAI_API_EXTRA_PARAMS: any;
+  OPENAI_CHAT_MODELS_LIST: string;
   constructor() {
     this.OPENAI_API_KEY = [];
     this.OPENAI_CHAT_MODEL = "gpt-4o-mini";
@@ -50,6 +77,11 @@ class OpenAIConfig {
 }
 
 class DallEConfig {
+  DALL_E_MODEL: string;
+  DALL_E_IMAGE_SIZE: string;
+  DALL_E_IMAGE_QUALITY: string;
+  DALL_E_IMAGE_STYLE: string;
+  DALL_E_MODELS_LIST: string;
   constructor() {
     this.DALL_E_MODEL = "dall-e-3";
     this.DALL_E_IMAGE_SIZE = "1024x1024";
@@ -60,6 +92,13 @@ class DallEConfig {
 }
 
 class AzureConfig {
+  AZURE_API_KEY: any;
+  AZURE_RESOURCE_NAME: any;
+  AZURE_CHAT_MODEL: string;
+  AZURE_IMAGE_MODEL: string;
+  AZURE_API_VERSION: string;
+  AZURE_CHAT_MODELS_LIST: string;
+  AZURE_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.AZURE_API_KEY = null;
     this.AZURE_RESOURCE_NAME = null;
@@ -72,6 +111,13 @@ class AzureConfig {
 }
 
 class WorkersConfig {
+  CLOUDFLARE_ACCOUNT_ID: any;
+  CLOUDFLARE_TOKEN: any;
+  WORKERS_CHAT_MODEL: string;
+  WORKERS_IMAGE_MODEL: string;
+  WORKERS_CHAT_MODELS_LIST: string;
+  WORKERS_IMAGE_MODELS_LIST: string;
+  WORKERS_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.CLOUDFLARE_ACCOUNT_ID = null;
     this.CLOUDFLARE_TOKEN = null;
@@ -84,6 +130,11 @@ class WorkersConfig {
 }
 
 class GeminiConfig {
+  GOOGLE_API_KEY: any;
+  GOOGLE_API_BASE: string;
+  GOOGLE_CHAT_MODEL: string;
+  GOOGLE_CHAT_MODELS_LIST: string;
+  GOOGLE_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.GOOGLE_API_KEY = null;
     this.GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
@@ -94,6 +145,11 @@ class GeminiConfig {
 }
 
 class MistralConfig {
+  MISTRAL_API_KEY: any;
+  MISTRAL_API_BASE: string;
+  MISTRAL_CHAT_MODEL: string;
+  MISTRAL_CHAT_MODELS_LIST: string;
+  MISTRAL_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.MISTRAL_API_KEY = null;
     this.MISTRAL_API_BASE = "https://api.mistral.ai/v1";
@@ -104,6 +160,11 @@ class MistralConfig {
 }
 
 class CohereConfig {
+  COHERE_API_KEY: any;
+  COHERE_API_BASE: string;
+  COHERE_CHAT_MODEL: string;
+  COHERE_CHAT_MODELS_LIST: string;
+  COHERE_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.COHERE_API_KEY = null;
     this.COHERE_API_BASE = "https://api.cohere.com/v2";
@@ -114,6 +175,11 @@ class CohereConfig {
 }
 
 class AnthropicConfig {
+  ANTHROPIC_API_KEY: any;
+  ANTHROPIC_API_BASE: string;
+  ANTHROPIC_CHAT_MODEL: string;
+  ANTHROPIC_CHAT_MODELS_LIST: string;
+  ANTHROPIC_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.ANTHROPIC_API_KEY = null;
     this.ANTHROPIC_API_BASE = "https://api.anthropic.com/v1";
@@ -124,6 +190,11 @@ class AnthropicConfig {
 }
 
 class DeepSeekConfig {
+  DEEPSEEK_API_KEY: any;
+  DEEPSEEK_API_BASE: string;
+  DEEPSEEK_CHAT_MODEL: string;
+  DEEPSEEK_CHAT_MODELS_LIST: string;
+  DEEPSEEK_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.DEEPSEEK_API_KEY = null;
     this.DEEPSEEK_API_BASE = "https://api.deepseek.com";
@@ -134,6 +205,11 @@ class DeepSeekConfig {
 }
 
 class GroqConfig {
+  GROQ_API_KEY: any;
+  GROQ_API_BASE: string;
+  GROQ_CHAT_MODEL: string;
+  GROQ_CHAT_MODELS_LIST: string;
+  GROQ_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.GROQ_API_KEY = null;
     this.GROQ_API_BASE = "https://api.groq.com/openai/v1";
@@ -144,6 +220,11 @@ class GroqConfig {
 }
 
 class XAIConfig {
+  XAI_API_KEY: any;
+  XAI_API_BASE: string;
+  XAI_CHAT_MODEL: string;
+  XAI_CHAT_MODELS_LIST: string;
+  XAI_CHAT_EXTRA_PARAMS: any;
   constructor() {
     this.XAI_API_KEY = null;
     this.XAI_API_BASE = "https://api.x.ai/v1";
@@ -154,12 +235,44 @@ class XAIConfig {
 }
 
 class DefineKeys {
+  DEFINE_KEYS: any[];
   constructor() {
     this.DEFINE_KEYS = [];
   }
 }
 
 class EnvironmentConfig {
+  LANGUAGE: string;
+  UPDATE_BRANCH: string;
+  CHAT_COMPLETE_API_TIMEOUT: number;
+  TELEGRAM_API_DOMAIN: string;
+  TELEGRAM_AVAILABLE_TOKENS: any[];
+  DEFAULT_PARSE_MODE: string;
+  TELEGRAM_MIN_STREAM_INTERVAL: number;
+  TELEGRAM_PHOTO_SIZE_OFFSET: number;
+  TELEGRAM_IMAGE_TRANSFER_MODE: string;
+  MODEL_LIST_COLUMNS: number;
+  I_AM_A_GENEROUS_PERSON: boolean;
+  CHAT_WHITE_LIST: any[];
+  LOCK_USER_CONFIG_KEYS: string[];
+  TELEGRAM_BOT_NAME: any[];
+  CHAT_GROUP_WHITE_LIST: any[];
+  GROUP_CHAT_BOT_ENABLE: boolean;
+  GROUP_CHAT_BOT_SHARE_MODE: boolean;
+  AUTO_TRIM_HISTORY: boolean;
+  MAX_HISTORY_LENGTH: number;
+  MAX_TOKEN_LENGTH: number;
+  HISTORY_IMAGE_PLACEHOLDER: any;
+  HIDE_COMMAND_BUTTONS: any[];
+  SHOW_REPLY_BUTTON: boolean;
+  EXTRA_MESSAGE_CONTEXT: boolean;
+  EXTRA_MESSAGE_MEDIA_COMPATIBLE: string[];
+  STREAM_MODE: boolean;
+  SAFE_MODE: boolean;
+  DEBUG_MODE: boolean;
+  DEV_MODE: boolean;
+  DEFAULT_NET_MODE: boolean;
+  NET_MODE_KEY_PREFIX: string;
   constructor() {
     this.LANGUAGE = "he"; // עברית כברירת מחדל
     this.UPDATE_BRANCH = "master";
@@ -209,9 +322,9 @@ class EnvironmentConfig {
 // ==========================================
 // 3. פונקציות עזר של טלגרם (תמיכה בכפתורי Inline ומנגנון Fallback)
 // ==========================================
-async function sendTelegramMessage(chatId, text, token, replyMarkup) {
+async function sendTelegramMessage(chatId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const payload = {
+  const payload: any = {
     chat_id: chatId,
     text: text,
     parse_mode: "Markdown",
@@ -219,14 +332,14 @@ async function sendTelegramMessage(chatId, text, token, replyMarkup) {
   if (replyMarkup) {
     payload.reply_markup = replyMarkup;
   }
-
+  
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
 
-  let data = await response.json();
+  let data: any = await response.json();
 
   if (!data.ok && data.description && data.description.includes("can't find end of")) {
     console.warn("Telegram Markdown parsing failed, falling back to plain text.");
@@ -242,9 +355,9 @@ async function sendTelegramMessage(chatId, text, token, replyMarkup) {
   return data;
 }
 
-async function editTelegramMessage(chatId, messageId, text, token, replyMarkup) {
+async function editTelegramMessage(chatId: number, messageId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
   const url = `https://api.telegram.org/bot${token}/editMessageText`;
-  const payload = {
+  const payload: any = {
     chat_id: chatId,
     message_id: messageId,
     text: text,
@@ -253,14 +366,14 @@ async function editTelegramMessage(chatId, messageId, text, token, replyMarkup) 
   if (replyMarkup) {
     payload.reply_markup = replyMarkup;
   }
-
+  
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
 
-  let data = await response.json();
+  let data: any = await response.json();
 
   if (!data.ok && data.description && data.description.includes("can't find end of")) {
     console.warn("Telegram edit Markdown parsing failed, falling back to plain text.");
@@ -277,8 +390,8 @@ async function editTelegramMessage(chatId, messageId, text, token, replyMarkup) 
 }
 
 // פונקציית עזר לחלוקת כפתורים לשורות של עד 2 כפתורים בשורה
-function chunkButtons(buttons, chunkSize = 2) {
-  const result = [];
+function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
+  const result: any[][] = [];
   for (let i = 0; i < buttons.length; i += chunkSize) {
     result.push(buttons.slice(i, i + chunkSize));
   }
@@ -286,9 +399,9 @@ function chunkButtons(buttons, chunkSize = 2) {
 }
 
 // תפריט הבית לבחירת ספק מודלים - מסונן דינמית לפי המפתחות הקיימים בסודות
-async function sendProviderMenu(chatId, token, env) {
-  const buttons = [];
-
+async function sendProviderMenu(chatId: number, token: string, env: Env): Promise<void> {
+  const buttons: any[] = [];
+  
   const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
   const hasOpenAI = !!env.OPENAI_API_KEY;
   const hasCohere = !!env.COHERE_API_KEY;
@@ -315,9 +428,9 @@ async function sendProviderMenu(chatId, token, env) {
   };
 
   await sendTelegramMessage(
-    chatId,
-    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
-    token,
+    chatId, 
+    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:", 
+    token, 
     keyboard
   );
 }
@@ -325,7 +438,7 @@ async function sendProviderMenu(chatId, token, env) {
 // ==========================================
 // 4. פנייה לוורקר החיפוש (MCP) - עם תמיכה ב-JSON וב-SSE + Timeout
 // ==========================================
-async function fetchWebSearch(query, env) {
+async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
     console.error("SEARCH_SERVICE binding is missing in environment.");
@@ -370,7 +483,7 @@ async function fetchWebSearch(query, env) {
     }
 
     const contentType = response.headers.get("content-type") || "";
-    let jsonPayload = null;
+    let jsonPayload: any = null;
 
     if (contentType.includes("application/json")) {
       // תשובת JSON חד-פעמית (stateless, ללא session)
@@ -420,7 +533,7 @@ async function fetchWebSearch(query, env) {
     }
 
     return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
-  } catch (error) {
+  } catch (error: any) {
     clearTimeout(timeoutId);
     if (error?.name === "AbortError") {
       console.error("[fetchWebSearch] Timeout after 20s");
@@ -436,7 +549,7 @@ async function fetchWebSearch(query, env) {
 // ==========================================
 
 // קריאה ל-Gemini API עם תמיכה במודל שנבחר
-async function callGemini(systemPrompt, history, env, model) {
+async function callGemini(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
   const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של Gemini חסר (GEMINI_API_KEY).");
@@ -448,7 +561,7 @@ async function callGemini(systemPrompt, history, env, model) {
 
   const url = `${apiBase}/models/${modelName}:generateContent?key=${apiKey}`;
 
-  const contents = history.map((msg) => ({
+  const contents = history.map((msg: any) => ({
     role: msg.role === "assistant" || msg.role === "model" ? "model" : "user",
     parts: [{ text: msg.content }]
   }));
@@ -474,7 +587,7 @@ async function callGemini(systemPrompt, history, env, model) {
     throw new Error(`Gemini API Error: ${errorText}`);
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
   const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!replyText) {
     throw new Error("לא התקבלה תשובה תקינה מ-Gemini.");
@@ -483,7 +596,7 @@ async function callGemini(systemPrompt, history, env, model) {
 }
 
 // קריאה ל-OpenAI API עם תמיכה במודל שנבחר
-async function callOpenAI(systemPrompt, history, env, model) {
+async function callOpenAI(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
   const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של OpenAI חסר (OPENAI_API_KEY).");
@@ -495,7 +608,7 @@ async function callOpenAI(systemPrompt, history, env, model) {
 
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg) => ({
+    ...history.map((msg: any) => ({
       role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
       content: msg.content
     }))
@@ -519,7 +632,7 @@ async function callOpenAI(systemPrompt, history, env, model) {
     throw new Error(`OpenAI API Error: ${errorText}`);
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
   const replyText = data.choices?.[0]?.message?.content;
   if (!replyText) {
     throw new Error("לא התקבלה תשובה תקינה מ-OpenAI.");
@@ -528,7 +641,7 @@ async function callOpenAI(systemPrompt, history, env, model) {
 }
 
 // קריאה ל-Cohere API (v2 Chat Completions Endpoint)
-async function callCohere(systemPrompt, history, env, model) {
+async function callCohere(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
   const apiKey = env.COHERE_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
@@ -540,7 +653,7 @@ async function callCohere(systemPrompt, history, env, model) {
 
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg) => ({
+    ...history.map((msg: any) => ({
       role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
       content: msg.content
     }))
@@ -563,7 +676,7 @@ async function callCohere(systemPrompt, history, env, model) {
     throw new Error(`Cohere API Error: ${errorText}`);
   }
 
-  const data = await response.json();
+  const data: any = await response.json();
 
   let replyText = "";
   if (data.message?.content) {
@@ -582,7 +695,7 @@ async function callCohere(systemPrompt, history, env, model) {
 }
 
 // ניתוב חכם וחופשי לפי בחירת המשתמש (תמיכה מלאה ב-Gemini, OpenAI, Cohere)
-async function callLLM(systemPrompt, history, env, provider, model) {
+async function callLLM(systemPrompt: string, history: any[], env: Env, provider: string, model: string): Promise<string> {
   if (provider === "openai") {
     return await callOpenAI(systemPrompt, history, env, model);
   } else if (provider === "cohere") {
@@ -596,7 +709,7 @@ async function callLLM(systemPrompt, history, env, provider, model) {
 // ==========================================
 // 6. תהליך טיפול אסינכרוני מלא ברקע (עם קריאת המודל שנבחר ב-KV)
 // ==========================================
-async function handleMessageAndReply(chatId, text, env) {
+async function handleMessageAndReply(chatId: number, text: string, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   if (!token) return;
 
@@ -617,7 +730,7 @@ async function handleMessageAndReply(chatId, text, env) {
     const userModel = (await env.DATABASE.get(`user_model_${chatId}`)) || defaultModel;
 
     let searchResults = "";
-    let tempMessageId = null;
+    let tempMessageId: number | null = null;
 
     if (isNetOn) {
       // הודעת המתנה
@@ -631,7 +744,7 @@ async function handleMessageAndReply(chatId, text, env) {
     }
 
     // שליפת היסטוריית השיחות
-    let history = [];
+    let history: any[] = [];
     const rawHistory = await env.DATABASE.get(`history_${chatId}`);
     if (rawHistory) {
       try {
@@ -652,7 +765,7 @@ async function handleMessageAndReply(chatId, text, env) {
     let botReply = "";
     try {
       botReply = await callLLM(systemPrompt, history, env, userProvider, userModel);
-    } catch (error) {
+    } catch (error: any) {
       console.error("LLM Call Error:", error);
       botReply = `מצטער, חלה שגיאה בעיבוד התשובה: ${error.message}`;
     }
@@ -664,7 +777,7 @@ async function handleMessageAndReply(chatId, text, env) {
       history = history.slice(history.length - envConfig.MAX_HISTORY_LENGTH);
     }
 
-    // שמירה ב-KV עם TTL של 24 שעות למניעת זבל
+    // שמירה ב-KV WITH TTL של 24 שעות למניעת זבל
     await env.DATABASE.put(`history_${chatId}`, JSON.stringify(history), { expirationTtl: 86400 });
 
     // עדכון הודעת הביניים או שליחת הודעה חדשה
@@ -682,7 +795,7 @@ async function handleMessageAndReply(chatId, text, env) {
 // ==========================================
 // 7. טיפול בלחיצות כפתור Inline (Callback Query Handler)
 // ==========================================
-async function handleCallbackQuery(callbackQuery, env) {
+async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   const chatId = callbackQuery.message.chat.id;
   const messageId = callbackQuery.message.message_id;
@@ -704,7 +817,7 @@ async function handleCallbackQuery(callbackQuery, env) {
       if (!providerInfo) return;
 
       // בניית רשימת כפתורי המודלים
-      const keyboardRows = providerInfo.models.map((model) => {
+      const keyboardRows = providerInfo.models.map((model: string) => {
         return [{ text: `🤖 ${model}`, callback_data: `select_model:${provider}:${model}` }];
       });
       // הוספת כפתור "חזור" לתפריט הראשי
@@ -749,7 +862,7 @@ async function handleCallbackQuery(callbackQuery, env) {
 
     // תרחיש ג': המשתמש בחר לחזור אחורה (מציג שוב רק את הספקים שיש להם מפתח פעיל)
     else if (data === "back_to_providers") {
-      const buttons = [];
+      const buttons: any[] = [];
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
       const hasOpenAI = !!env.OPENAI_API_KEY;
       const hasCohere = !!env.COHERE_API_KEY;
@@ -792,7 +905,7 @@ async function handleCallbackQuery(callbackQuery, env) {
 // 8. נקודת הכניסה של קלאודפלייר (Cloudflare Worker Handler)
 // ==========================================
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
     if (request.method !== "POST") {
       return new Response("Bot is running!", { status: 200 });
     }
@@ -803,7 +916,7 @@ export default {
     }
 
     try {
-      const update = await request.json();
+      const update: any = await request.json();
 
       // ניתוב אסינכרוני עבור לחיצות כפתורי Inline
       if (update.callback_query) {
@@ -875,7 +988,7 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const data = await res.json();
+          const data: any = await res.json();
           const keys = data.keys; // חילוץ רשימת המפתחות מתוך שדה keys
 
           // בדיקה שהתשובה היא אכן מערך מפתחות למניעת קריסות map
@@ -884,7 +997,7 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const msg = `📊 **Tavily Credits:**\n` + keys.map((k) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
+          const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
 
           await sendTelegramMessage(chatId, msg, token);
           return new Response("OK", { status: 200 });
