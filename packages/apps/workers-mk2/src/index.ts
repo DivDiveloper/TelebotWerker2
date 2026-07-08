@@ -1,4 +1,4 @@
-// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה קצרה ומאובטחת /balance + הדפסת שגיאות מפורטת)
+// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
 
 // פתרון שגיאות קומפילציה של TypeScript עבור סביבות ללא הגדרות גלובליות של Cloudflare
 type KVNamespace = any;
@@ -16,6 +16,7 @@ export interface Env {
   GEMINI_API_KEY?: string;
   GOOGLE_API_KEY?: string;
   OPENAI_API_KEY?: string;
+  COHERE_API_KEY?: string; // מפתח האבטחה עבור Cohere
   TAVILY_PROXY_AUTH_KEY?: string;
   AI_PROVIDER?: string;
 }
@@ -29,6 +30,10 @@ const PROVIDERS: any = {
   openai: {
     name: "OpenAI ⚡",
     models: ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
+  },
+  cohere: {
+    name: "Cohere 🔮",
+    models: ["command-r-plus", "command-r", "command-r-08-2024"]
   }
 };
 
@@ -252,12 +257,22 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
   return data;
 }
 
+// פונקציית עזר לחלוקת כפתורים לשורות של עד 2 כפתורים בשורה
+function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
+  const result: any[][] = [];
+  for (let i = 0; i < buttons.length; i += chunkSize) {
+    result.push(buttons.slice(i, i + chunkSize));
+  }
+  return result;
+}
+
 // תפריט הבית לבחירת ספק מודלים - מסונן דינמית לפי המפתחות הקיימים בסודות
 async function sendProviderMenu(chatId: number, token: string, env: Env): Promise<void> {
   const buttons: any[] = [];
   
   const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
   const hasOpenAI = !!env.OPENAI_API_KEY;
+  const hasCohere = !!env.COHERE_API_KEY;
 
   if (hasGemini) {
     buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
@@ -265,15 +280,19 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   if (hasOpenAI) {
     buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
   }
+  if (hasCohere) {
+    buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
+  }
 
-  // במידה ולא הוגדר אף מפתח, נציג את שניהם כברירת מחדל כדי למנוע תפריט ריק
+  // במידה ולא הוגדר אף מפתח, נציג את כולם כברירת מחדל כדי למנוע תפריט ריק
   if (buttons.length === 0) {
     buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
     buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
+    buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
   }
 
   const keyboard = {
-    inline_keyboard: [buttons]
+    inline_keyboard: chunkButtons(buttons, 2) // עימוד חכם של 2 כפתורים בשורה
   };
 
   await sendTelegramMessage(
@@ -378,7 +397,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
       }
     }
 
-    return searchResultText || "לא נמצאו תוצאות חיפוש רלוונטיות.";
+    return searchResultText || "לאמצאו תוצאות חיפוש רלוונטיות.";
   } catch (error: any) {
     console.error("Search failed:", error);
     return `שגיאה במהלך ביצוע החיפוש: ${error.message}`;
@@ -481,10 +500,66 @@ async function callOpenAI(systemPrompt: string, history: any[], env: Env, model:
   return replyText;
 }
 
-// ניתוב חכם וחופשי לפי בחירת המשתמש
+// קריאה ל-Cohere API (v2 Chat Completions Endpoint)
+async function callCohere(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+  const apiKey = env.COHERE_API_KEY;
+  if (!apiKey) {
+    throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
+  }
+
+  const modelConfig = new CohereConfig();
+  const url = `${modelConfig.COHERE_API_BASE}/chat`;
+  const modelName = model || modelConfig.COHERE_CHAT_MODEL;
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history.map((msg: any) => ({
+      role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
+      content: msg.content
+    }))
+  ];
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: modelName,
+      messages: messages
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Cohere API Error: ${errorText}`);
+  }
+
+  const data: any = await response.json();
+  
+  let replyText = "";
+  if (data.message?.content) {
+    if (Array.isArray(data.message.content)) {
+      replyText = data.message.content[0]?.text || "";
+    } else if (typeof data.message.content === "string") {
+      replyText = data.message.content;
+    }
+  }
+
+  if (!replyText) {
+    throw new Error("לא התקבלה תשובה תקינה מ-Cohere.");
+  }
+  
+  return replyText;
+}
+
+// ניתוב חכם וחופשי לפי בחירת המשתמש (תמיכה מלאה ב-Gemini, OpenAI, Cohere)
 async function callLLM(systemPrompt: string, history: any[], env: Env, provider: string, model: string): Promise<string> {
   if (provider === "openai") {
     return await callOpenAI(systemPrompt, history, env, model);
+  } else if (provider === "cohere") {
+    return await callCohere(systemPrompt, history, env, model);
   } else {
     // ברירת מחדל ל-Gemini
     return await callGemini(systemPrompt, history, env, model);
@@ -507,7 +582,11 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
     const defaultProvider = globalProvider === "auto" ? "gemini" : globalProvider;
     const userProvider = (await env.DATABASE.get(`user_provider_${chatId}`)) || defaultProvider;
 
-    const defaultModel = userProvider === "openai" ? "gpt-4o-mini" : "gemini-2.5-flash";
+    // הגדרת מודל ברירת מחדל דינמי לפי הספק הפעיל
+    let defaultModel = "gemini-2.5-flash";
+    if (userProvider === "openai") defaultModel = "gpt-4o-mini";
+    if (userProvider === "cohere") defaultModel = "command-r-plus";
+
     const userModel = (await env.DATABASE.get(`user_model_${chatId}`)) || defaultModel;
 
     let searchResults = "";
@@ -625,7 +704,11 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       await env.DATABASE.put(`user_model_${chatId}`, model);
 
       // עדכון הודעת האישור הסופית בצ'אט
-      const providerName = provider === "gemini" ? "Google Gemini 🤖" : "OpenAI ⚡";
+      let providerEmoji = "🤖";
+      if (provider === "openai") providerEmoji = "⚡";
+      if (provider === "cohere") providerEmoji = "🔮";
+      
+      const providerName = PROVIDERS[provider]?.name || provider;
       await editTelegramMessage(
         chatId,
         messageId,
@@ -642,6 +725,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       const buttons: any[] = [];
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
       const hasOpenAI = !!env.OPENAI_API_KEY;
+      const hasCohere = !!env.COHERE_API_KEY;
 
       if (hasGemini) {
         buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
@@ -649,14 +733,18 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       if (hasOpenAI) {
         buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
       }
+      if (hasCohere) {
+        buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
+      }
 
       if (buttons.length === 0) {
         buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
         buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
+        buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
       }
 
       const keyboard = {
-        inline_keyboard: [buttons]
+        inline_keyboard: chunkButtons(buttons, 2) // עימוד חכם
       };
       
       await editTelegramMessage(
@@ -760,15 +848,16 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const keys: any = await res.json();
+          const data: any = await res.json();
+          const keys = data.keys; // חילוץ רשימת המפתחות מתוך שדה keys
 
           // בדיקה שהתשובה היא אכן מערך מפתחות למניעת קריסות map
-          if (!Array.isArray(keys)) {
-            await sendTelegramMessage(chatId, `⚠️ **שגיאה:** ה-Proxy החזיר נתון שאינו תואם למבנה הנדרש.\n\nנתון גולמי: \`${JSON.stringify(keys)}\``, token);
+          if (!keys || !Array.isArray(keys)) {
+            await sendTelegramMessage(chatId, `⚠️ **שגיאה:** ה-Proxy החזיר נתון שאינו תואם למבנה הנדרש.\n\nנתון גולמי: \`${JSON.stringify(data)}\``, token);
             return new Response("OK", { status: 200 });
           }
 
-          const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.credits || 0).toLocaleString()}*`).join("\n");
+          const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
           
           await sendTelegramMessage(chatId, msg, token);
           return new Response("OK", { status: 200 });
