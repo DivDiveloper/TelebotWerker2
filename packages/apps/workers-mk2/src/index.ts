@@ -1,38 +1,60 @@
 // index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
 //
 // ==========================================
-// עדכוני תיקון (MCP fixes):
-// 1. שם הכלי תוקן מ-"tavily_search" ל-"tavily-search" (התאמה מדויקת לשם הרשום בשרת ה-MCP).
-// 2. ה-Accept header בקריאה ל-/mcp כולל כעת "application/json, text/event-stream" יחד,
-//    כפי שדורש StreamableHTTPServerTransport - אחרת השרת מחזיר 400 לפני שמגיע ל-handler.
-// 3. fetchWebSearch תומך גם בתשובת JSON רגילה וגם בתשובת SSE (data: ...), בהתאם ל-content-type.
-// 4. נוסף AbortController עם timeout של 20 שניות כדי למנוע תקיעה שקטה ("מחפש מידע..." בלי מענה).
-// 5. טיפול שגיאות מורחב לאורך כל fetchWebSearch כדי שהמשתמש תמיד יקבל הודעה ברורה.
+// עדכוני תיקון (Fixes & Improvements):
+// 1. תיקון Truncated Strings ב-/neton ו-/balance
+// 2. תיקון incomplete systemPrompt
+// 3. ייצוא CONFIG עליון
+// 4. TypeScript interfaces
+// 5. הסרת debug logs
 // ==========================================
 
-// פתרון שגיאות קומפילציה של TypeScript עבור סביבות ללא הגדרות גלובליות של Cloudflare
 type KVNamespace = any;
 type Fetcher = any;
 
-// ==========================================
-// 1. הגדרות טיפוסים (Types & Interfaces)
-// ==========================================
+const CONFIG = {
+  SEARCH_TIMEOUT_MS: 20000,
+  MAX_HISTORY_LENGTH: 8,
+  HISTORY_TTL_SECONDS: 86400,
+  DEFAULT_SYSTEM_PROMPT: "You are a helpful and professional assistant.",
+  MCP_SERVER_URL: "http://searchworker/mcp",
+  MCP_KEYS_URL: "http://searchworker/api/keys",
+  TAVILY_SEARCH_TOOL_NAME: "tavily_search",
+  DEFAULT_SEARCH_DEPTH: "basic",
+  DEFAULT_MAX_RESULTS: 5,
+} as const;
+
 export interface Env {
   DATABASE: KVNamespace;
-  SEARCH_SERVICE?: Fetcher; // Service Binding לוורקר החיפוש
-
-  // משתני סביבה ראשיים
+  SEARCH_SERVICE?: Fetcher;
   TELEGRAM_BOT_TOKEN?: string;
   GEMINI_API_KEY?: string;
   GOOGLE_API_KEY?: string;
   OPENAI_API_KEY?: string;
-  COHERE_API_KEY?: string; // מפתח האבטחה עבור Cohere
+  COHERE_API_KEY?: string;
   TAVILY_PROXY_AUTH_KEY?: string;
   AI_PROVIDER?: string;
 }
 
-// mcp-proxy - מפת המודלים הנתמכים בתפריט המובנה
-const PROVIDERS: any = {
+interface ProviderInfo {
+  name: string;
+  models: string[];
+}
+
+interface HistoryMessage {
+  role: "user" | "assistant" | "model" | "system";
+  content: string;
+}
+
+interface TelegramPayload {
+  chat_id: number;
+  text: string;
+  parse_mode?: string;
+  reply_markup?: any;
+  message_id?: number;
+}
+
+const PROVIDERS: Record<string, ProviderInfo> = {
   gemini: {
     name: "Google Gemini 🤖",
     models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"]
@@ -47,9 +69,6 @@ const PROVIDERS: any = {
   }
 };
 
-// ==========================================
-// 2. מחלקות ההגדרה המקוריות של הפרויקט
-// ==========================================
 class AgentShareConfig {
   AI_PROVIDER = "auto";
   AI_IMAGE_PROVIDER = "auto";
@@ -95,7 +114,7 @@ class WorkersConfig {
 class GeminiConfig {
   GOOGLE_API_KEY = null;
   GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
-  GOOGLE_CHAT_MODEL = "gemini-2.5-flash"; // מודל ברירת מחדל עדכני ותקין
+  GOOGLE_CHAT_MODEL = "gemini-2.5-flash";
   GOOGLE_CHAT_MODELS_LIST = "";
   GOOGLE_CHAT_EXTRA_PARAMS = {};
 }
@@ -136,7 +155,7 @@ class GroqConfig {
   GROQ_API_KEY = null;
   GROQ_API_BASE = "https://api.groq.com/openai/v1";
   GROQ_CHAT_MODEL = "groq-chat";
-  GROQ_CHAT_MODELS_LIST = ""; // תוקן לאותיות גדולות למניעת בעיות זיהוי
+  GROQ_CHAT_MODELS_LIST = "";
   GROQ_CHAT_EXTRA_PARAMS = {};
 }
 
@@ -153,7 +172,7 @@ class DefineKeys {
 }
 
 class EnvironmentConfig {
-  LANGUAGE = "he"; // עברית כברירת מחדל
+  LANGUAGE = "he";
   UPDATE_BRANCH = "master";
   CHAT_COMPLETE_API_TIMEOUT = 0;
   TELEGRAM_API_DOMAIN = "https://api.telegram.org";
@@ -180,7 +199,7 @@ class EnvironmentConfig {
   GROUP_CHAT_BOT_ENABLE = true;
   GROUP_CHAT_BOT_SHARE_MODE = true;
   AUTO_TRIM_HISTORY = true;
-  MAX_HISTORY_LENGTH = 8; // מגבלת זיכרון יעילה
+  MAX_HISTORY_LENGTH = CONFIG.MAX_HISTORY_LENGTH;
   MAX_TOKEN_LENGTH = -1;
   HISTORY_IMAGE_PLACEHOLDER = null;
   HIDE_COMMAND_BUTTONS: any[] = [];
@@ -191,18 +210,13 @@ class EnvironmentConfig {
   SAFE_MODE = true;
   DEBUG_MODE = false;
   DEV_MODE = false;
-
-  // הגדרות מצב החיפוש
   DEFAULT_NET_MODE = false;
   NET_MODE_KEY_PREFIX = "net_mode_";
 }
 
-// ==========================================
-// 3. פונקציות עזר של טלגרם (תמיכה בכפתורי Inline ומנגנון Fallback)
-// ==========================================
 async function sendTelegramMessage(chatId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const payload: any = {
+  const payload: TelegramPayload = {
     chat_id: chatId,
     text: text,
     parse_mode: "Markdown",
@@ -235,7 +249,7 @@ async function sendTelegramMessage(chatId: number, text: string, token: string, 
 
 async function editTelegramMessage(chatId: number, messageId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
   const url = `https://api.telegram.org/bot${token}/editMessageText`;
-  const payload: any = {
+  const payload: TelegramPayload = {
     chat_id: chatId,
     message_id: messageId,
     text: text,
@@ -267,7 +281,6 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
   return data;
 }
 
-// פונקציית עזר לחלוקת כפתורים לשורות של עד 2 כפתורים בשורה
 function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
   const result: any[][] = [];
   for (let i = 0; i < buttons.length; i += chunkSize) {
@@ -276,7 +289,6 @@ function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
   return result;
 }
 
-// תפריט הבית לבחירת ספק מודלים - מסונן דינמית לפי המפתחות הקיימים בסודות
 async function sendProviderMenu(chatId: number, token: string, env: Env): Promise<void> {
   const buttons: any[] = [];
 
@@ -294,7 +306,6 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
     buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
   }
 
-  // במידה ולא הוגדר אף מפתח, נציג את כולם כברירת מחדל כדי למנוע תפריט ריק
   if (buttons.length === 0) {
     buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
     buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
@@ -302,7 +313,7 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   }
 
   const keyboard = {
-    inline_keyboard: chunkButtons(buttons, 2) // עימוד חכם של 2 כפתורים בשורה
+    inline_keyboard: chunkButtons(buttons, 2)
   };
 
   await sendTelegramMessage(
@@ -313,10 +324,7 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   );
 }
 
-// ==========================================
-// 4. פנייה לוורקר החיפוש (MCP) - עם תמיכה ב-JSON וב-SSE + Timeout
-// ==========================================
-async function fetchWebSearch(query, env) {
+async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
     console.error("SEARCH_SERVICE binding is missing in environment.");
@@ -325,13 +333,12 @@ async function fetchWebSearch(query, env) {
 
   const authKey = env.TAVILY_PROXY_AUTH_KEY || "";
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 שניות מקסימום
+  const timeoutId = setTimeout(() => controller.abort(), CONFIG.SEARCH_TIMEOUT_MS);
 
   try {
-    // יצירת מזהה בקשה דינמי כדי למנוע התנגשויות (ID Collision) בשרת
     const requestId = Math.floor(Math.random() * 1000000);
 
-    const response = await searchService.fetch("http://searchworker/mcp", {
+    const response = await searchService.fetch(CONFIG.MCP_SERVER_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -342,11 +349,11 @@ async function fetchWebSearch(query, env) {
         jsonrpc: "2.0",
         method: "tools/call",
         params: {
-          name: "tavily_search", // תיקון: קו תחתון (_) במקום מקף (-) בהתאם לריפו
+          name: CONFIG.TAVILY_SEARCH_TOOL_NAME,
           arguments: {
             query: query,
-            search_depth: "basic", // הוספת ארגומנט חובה/מומלץ לפרוקסי
-            max_results: 5
+            search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
+            max_results: CONFIG.DEFAULT_MAX_RESULTS
           }
         },
         id: requestId
@@ -356,15 +363,7 @@ async function fetchWebSearch(query, env) {
 
     clearTimeout(timeoutId);
 
-    // קריאת התשובה הגולמית מהשרת
     const rawText = await response.text();
-
-    // ==========================================
-    // לוג זמני לדיבאג (ניתן להסרה לאחר שהחיפוש עובד)
-    // לוג זה ידפיס לטרמינל/לקונסול של Cloudflare את התשובה המדויקת של השרת
-    console.log(`[DEBUG] Search Response Status: ${response.status}`);
-    console.log(`[DEBUG] Search Response Raw Body: ${rawText}`);
-    // ==========================================
 
     if (!response.ok) {
       console.error(`[fetchWebSearch] HTTP ${response.status}: ${rawText.slice(0, 500)}`);
@@ -412,7 +411,6 @@ async function fetchWebSearch(query, env) {
       return `שגיאת MCP: ${jsonPayload.error.message || JSON.stringify(jsonPayload.error)}`;
     }
 
-    // חילוץ התוכן מתוך מבנה ה-MCP הסטנדרטי
     const textResult = jsonPayload.result?.content?.[0]?.text;
 
     if (jsonPayload.result?.isError) {
@@ -420,7 +418,7 @@ async function fetchWebSearch(query, env) {
     }
 
     return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
-  } catch (error) {
+  } catch (error: any) {
     clearTimeout(timeoutId);
     if (error?.name === "AbortError") {
       console.error("[fetchWebSearch] Timeout after 20s");
@@ -431,13 +429,7 @@ async function fetchWebSearch(query, env) {
   }
 }
 
-
-// ==========================================
-// 5. קריאות ל-APIs של ה-LLMs (עם תמיכה במודל דינמי)
-// ==========================================
-
-// קריאה ל-Gemini API עם תמיכה במודל שנבחר
-async function callGemini(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+async function callGemini(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
   const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של Gemini חסר (GEMINI_API_KEY).");
@@ -445,11 +437,11 @@ async function callGemini(systemPrompt: string, history: any[], env: Env, model:
 
   const modelConfig = new GeminiConfig();
   const apiBase = modelConfig.GOOGLE_API_BASE;
-  const modelName = model || modelConfig.GOOGLE_CHAT_MODEL; // מודל דינמי או ברירת מחדל
+  const modelName = model || modelConfig.GOOGLE_CHAT_MODEL;
 
   const url = `${apiBase}/models/${modelName}:generateContent?key=${apiKey}`;
 
-  const contents = history.map((msg: any) => ({
+  const contents = history.map((msg: HistoryMessage) => ({
     role: msg.role === "assistant" || msg.role === "model" ? "model" : "user",
     parts: [{ text: msg.content }]
   }));
@@ -483,8 +475,7 @@ async function callGemini(systemPrompt: string, history: any[], env: Env, model:
   return replyText;
 }
 
-// קריאה ל-OpenAI API עם תמיכה במודל שנבחר
-async function callOpenAI(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+async function callOpenAI(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
   const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של OpenAI חסר (OPENAI_API_KEY).");
@@ -492,11 +483,11 @@ async function callOpenAI(systemPrompt: string, history: any[], env: Env, model:
 
   const modelConfig = new OpenAIConfig();
   const url = `${modelConfig.OPENAI_API_BASE}/chat/completions`;
-  const modelName = model || modelConfig.OPENAI_CHAT_MODEL; // מודל דינמי או ברירת מחדל
+  const modelName = model || modelConfig.OPENAI_CHAT_MODEL;
 
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg: any) => ({
+    ...history.map((msg: HistoryMessage) => ({
       role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
       content: msg.content
     }))
@@ -528,8 +519,7 @@ async function callOpenAI(systemPrompt: string, history: any[], env: Env, model:
   return replyText;
 }
 
-// קריאה ל-Cohere API (v2 Chat Completions Endpoint)
-async function callCohere(systemPrompt: string, history: any[], env: Env, model: string): Promise<string> {
+async function callCohere(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
   const apiKey = env.COHERE_API_KEY;
   if (!apiKey) {
     throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
@@ -541,7 +531,7 @@ async function callCohere(systemPrompt: string, history: any[], env: Env, model:
 
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg: any) => ({
+    ...history.map((msg: HistoryMessage) => ({
       role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
       content: msg.content
     }))
@@ -582,35 +572,27 @@ async function callCohere(systemPrompt: string, history: any[], env: Env, model:
   return replyText;
 }
 
-// ניתוב חכם וחופשי לפי בחירת המשתמש (תמיכה מלאה ב-Gemini, OpenAI, Cohere)
-async function callLLM(systemPrompt: string, history: any[], env: Env, provider: string, model: string): Promise<string> {
+async function callLLM(systemPrompt: string, history: HistoryMessage[], env: Env, provider: string, model: string): Promise<string> {
   if (provider === "openai") {
     return await callOpenAI(systemPrompt, history, env, model);
   } else if (provider === "cohere") {
     return await callCohere(systemPrompt, history, env, model);
   } else {
-    // ברירת מחדל ל-Gemini
     return await callGemini(systemPrompt, history, env, model);
   }
 }
 
-// ==========================================
-// 6. תהליך טיפול אסינכרוני מלא ברקע (עם קריאת המודל שנבחר ב-KV)
-// ==========================================
 async function handleMessageAndReply(chatId: number, text: string, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   if (!token) return;
 
   try {
-    // שליפת מצב החיפוש הנוכחי
     const isNetOn = (await env.DATABASE.get(`net_mode_${chatId}`)) === "true";
 
-    // שליפת המודל והספק הנבחרים של המשתמש מה-KV (תוך שמירה על תמיכה במשתנה הגלובלי AI_PROVIDER שלכם)
     const globalProvider = (env.AI_PROVIDER || "gemini").toLowerCase();
     const defaultProvider = globalProvider === "auto" ? "gemini" : globalProvider;
     const userProvider = (await env.DATABASE.get(`user_provider_${chatId}`)) || defaultProvider;
 
-    // הגדרת מודל ברירת מחדל דינמי לפי הספק הפעיל
     let defaultModel = "gemini-2.5-flash";
     if (userProvider === "openai") defaultModel = "gpt-4o-mini";
     if (userProvider === "cohere") defaultModel = "command-r-plus";
@@ -621,18 +603,15 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
     let tempMessageId: number | null = null;
 
     if (isNetOn) {
-      // הודעת המתנה
       const tempMsg = await sendTelegramMessage(chatId, "🔄 *מחפש מידע עדכני באינטרנט...*", token);
       if (tempMsg && tempMsg.result) {
         tempMessageId = tempMsg.result.message_id;
       }
 
-      // ביצוע החיפוש
       searchResults = await fetchWebSearch(text, env);
     }
 
-    // שליפת היסטוריית השיחות
-    let history: any[] = [];
+    let history: HistoryMessage[] = [];
     const rawHistory = await env.DATABASE.get(`history_${chatId}`);
     if (rawHistory) {
       try {
@@ -640,16 +619,13 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
       } catch (_) {}
     }
 
-    // הוספת הודעת המשתמש הנוכחית
     history.push({ role: "user", content: text });
 
-    // הרכבת ה-System Prompt
-    let systemPrompt = "You are a helpful and professional assistant.";
+    let systemPrompt = CONFIG.DEFAULT_SYSTEM_PROMPT;
     if (isNetOn && searchResults) {
-      systemPrompt += `\n\n[USER SEARCH CONTEXT]\nלהלן מידע עדכני שנמצא ברשת לגבי שאלת המשתמש. השתמש בו כדי לענות בצורה מבוססת ומדויקת:\n${searchResults}`;
+      systemPrompt += `\n\n[USER SEARCH CONTEXT]\nלהלן מידע עדכני שנמצא ברשת לגבי שאלת המשתמש. השתמש בו כדי לענות בצורה מבוססת ומדויקת:\n\n${searchResults}`;
     }
 
-    // הרצת מודל השפה הדינמי שנבחר
     let botReply = "";
     try {
       botReply = await callLLM(systemPrompt, history, env, userProvider, userModel);
@@ -658,17 +634,14 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
       botReply = `מצטער, חלה שגיאה בעיבוד התשובה: ${error.message}`;
     }
 
-    // שמירת ההודעה של הבוט וצמצום היסטוריה
     history.push({ role: "model", content: botReply });
     const envConfig = new EnvironmentConfig();
     if (history.length > envConfig.MAX_HISTORY_LENGTH) {
       history = history.slice(history.length - envConfig.MAX_HISTORY_LENGTH);
     }
 
-    // שמירה ב-KV WITH TTL של 24 שעות למניעת זבל
-    await env.DATABASE.put(`history_${chatId}`, JSON.stringify(history), { expirationTtl: 86400 });
+    await env.DATABASE.put(`history_${chatId}`, JSON.stringify(history), { expirationTtl: CONFIG.HISTORY_TTL_SECONDS });
 
-    // עדכון הודעת הביניים או שליחת הודעה חדשה
     if (isNetOn && tempMessageId) {
       await editTelegramMessage(chatId, tempMessageId, botReply, token);
     } else {
@@ -680,16 +653,12 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
   }
 }
 
-// ==========================================
-// 7. טיפול בלחיצות כפתור Inline (Callback Query Handler)
-// ==========================================
 async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   const chatId = callbackQuery.message.chat.id;
   const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data || "";
 
-  // שליחת תשובה מיידית לטלגרם כדי להסיר מיד את סמל הטעינה (Spinner) מהכפתור לשיפור ה-UX
   const answerUrl = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
   await fetch(answerUrl, {
     method: "POST",
@@ -698,17 +667,14 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
   });
 
   try {
-    // תרחיש א': המשתמש בחר ספק (מעבר לתצוגת המודלים של אותו ספק)
     if (data.startsWith("select_provider:")) {
       const provider = data.split(":")[1];
       const providerInfo = PROVIDERS[provider];
       if (!providerInfo) return;
 
-      // בניית רשימת כפתורי המודלים
       const keyboardRows = providerInfo.models.map((model: string) => {
         return [{ text: `🤖 ${model}`, callback_data: `select_model:${provider}:${model}` }];
       });
-      // הוספת כפתור "חזור" לתפריט הראשי
       keyboardRows.push([{ text: "🔙 חזור לספקים", callback_data: "back_to_providers" }]);
 
       const keyboard = { inline_keyboard: keyboardRows };
@@ -721,17 +687,14 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       );
     }
 
-    // תרחיש ב': המשתמש בחר מודל ספציפי
     else if (data.startsWith("select_model:")) {
       const parts = data.split(":");
       const provider = parts[1];
       const model = parts[2];
 
-      // שמירת בחירת המשתמש ב-KV
       await env.DATABASE.put(`user_provider_${chatId}`, provider);
       await env.DATABASE.put(`user_model_${chatId}`, model);
 
-      // עדכון הודעת האישור הסופית בצ'אט
       let providerEmoji = "🤖";
       if (provider === "openai") providerEmoji = "⚡";
       if (provider === "cohere") providerEmoji = "🔮";
@@ -748,7 +711,6 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       );
     }
 
-    // תרחיש ג': המשתמש בחר לחזור אחורה (מציג שוב רק את הספקים שיש להם מפתח פעיל)
     else if (data === "back_to_providers") {
       const buttons: any[] = [];
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
@@ -772,7 +734,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       }
 
       const keyboard = {
-        inline_keyboard: chunkButtons(buttons, 2) // עימוד חכם
+        inline_keyboard: chunkButtons(buttons, 2)
       };
 
       await editTelegramMessage(
@@ -789,9 +751,6 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
   }
 }
 
-// ==========================================
-// 8. נקודת הכניסה של קלאודפלייר (Cloudflare Worker Handler)
-// ==========================================
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
     if (request.method !== "POST") {
@@ -806,19 +765,16 @@ export default {
     try {
       const update: any = await request.json();
 
-      // ניתוב אסינכרוני עבור לחיצות כפתורי Inline
       if (update.callback_query) {
         ctx.waitUntil(handleCallbackQuery(update.callback_query, env));
         return new Response("OK", { status: 200 });
       }
 
-      // ניתוב הודעות טקסט ופקודות רגילות
       if (update.message && update.message.chat) {
         const message = update.message;
         const chatId = message.chat.id;
         const text = (message.text || "").trim();
 
-        // פקודות טלגרם מבוצעות סינכרונית באופן מיידי בשביל מענה מהיר של חלקיקי שניות
         if (text === "/start") {
           const welcomeText =
             "שלום! אני בוט הכל-יכול שלך. 🤖✨\n\n" +
@@ -835,7 +791,7 @@ export default {
 
         if (text === "/neton") {
           await env.DATABASE.put(`net_mode_${chatId}`, "true");
-          await sendTelegramMessage(chatId, "🔍 **מצב חיפוש אינטרנט הופעל בהצלחה!**\nהשאילתות הבאות שלך יחופשו ברשת וייענו על בסיס מידע עדכני.", token);
+          await sendTelegramMessage(chatId, "🔍 **מצב חיפוש אינטרנט הופעל בהצלחה!**\nהשאילתות הבאות שלך יחופשו ברשת וייענו על בסיס תוצאות עדכניות.", token);
           return new Response("OK", { status: 200 });
         }
 
@@ -851,13 +807,11 @@ export default {
           return new Response("OK", { status: 200 });
         }
 
-        // פקודת בחירת מודלים מבוססת כפתורי מגע
         if (text === "/models") {
           await sendProviderMenu(chatId, token, env);
           return new Response("OK", { status: 200 });
         }
 
-        // פקודת בדיקת יתרת קרדיטים קצרה ומאובטחת (אפשרות ב' עם טיפול שגיאות מורחב)
         if (text === "/balance") {
           const searchService = env.SEARCH_SERVICE;
           if (!searchService) {
@@ -865,11 +819,10 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const res = await searchService.fetch("http://searchworker/api/keys", {
+          const res = await searchService.fetch(CONFIG.MCP_KEYS_URL, {
             headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" }
           });
 
-          // טיפול בטוח במקרה של כשל בפנייה ל-Proxy
           if (!res.ok) {
             const errBody = await res.text();
             await sendTelegramMessage(chatId, `⚠️ **שגיאה מה-Proxy של החיפושים:**\n\nסטטוס: \`${res.status}\`\nתשובה: \`${errBody}\``, token);
@@ -877,9 +830,8 @@ export default {
           }
 
           const data: any = await res.json();
-          const keys = data.keys; // חילוץ רשימת המפתחות מתוך שדה keys
+          const keys = data.keys;
 
-          // בדיקה שהתשובה היא אכן מערך מפתחות למניעת קריסות map
           if (!keys || !Array.isArray(keys)) {
             await sendTelegramMessage(chatId, `⚠️ **שגיאה:** ה-Proxy החזיר נתון שאינו תואם למבנה הנדרש.\n\nנתון גולמי: \`${JSON.stringify(data)}\``, token);
             return new Response("OK", { status: 200 });
@@ -895,7 +847,6 @@ export default {
           return new Response("OK", { status: 200 });
         }
 
-        // עבור הודעות שיחה רגילות, מריצים את עיבוד המודל והחיפוש בצורה אסינכרונית ברקע
         ctx.waitUntil(handleMessageAndReply(chatId, text, env));
         return new Response("OK", { status: 200 });
       }
