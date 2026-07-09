@@ -1,16 +1,28 @@
-// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + Cohere Command-A + NVIDIA)
+// index.ts - Unified async Telegram bot worker (Multi-LLM + Web Search Plugin + Inline Model Menu + Balance + Dynamic Model Cache)
 //
 // ==========================================
-// עדכוני תיקון (Fixes & Improvements):
-// 1. תיקון Truncated Strings ב-/neton ו-/balance
-// 2. תיקון incomplete systemPrompt
-// 3. ייצוא CONFIG עליון
-// 4. TypeScript interfaces
-// 5. הסרת debug logs מיותרים
-// 6. *** תיקון קריטי: מעבר מפרוטוקול MCP (JSON-RPC + handshake) לנתיב
-//    פנימי רזה POST /tools/tavily-search בשרת החיפוש.
-// 7. תמיכה בספק NVIDIA עם מודלי 120B דרך NVIDIA_API_KEY.
-// 8. עדכון דגמי Cohere לדגמי Command-A החדישים (A ו-A+).
+// Lean-up pass (this revision):
+// 1. Removed all debug console.log noise introduced during MCP debugging -
+//    only console.error remains, and only on genuine failure paths.
+// 2. Consolidated per-chat KV state: net-mode + provider + model used to be
+//    3 separate keys (3 reads per message). Now a single `settings:{chatId}`
+//    key holds all three as one JSON blob -> 1 read instead of 3 on the hot
+//    path (every incoming message). Free-plan KV/subrequest budget is finite
+//    per request, so fewer round trips matters as much as CPU time does.
+// 3. Removed ~150 lines of dead legacy scaffold classes (AzureConfig,
+//    WorkersConfig, MistralConfig, AnthropicConfig, DeepSeekConfig,
+//    GroqConfig, XAIConfig, DallEConfig, DefineKeys, AgentShareConfig,
+//    and the OpenAIConfig/GeminiConfig/CohereConfig/EnvironmentConfig
+//    wrapper classes) that were never actually read anywhere except for a
+//    couple of constant fields. Replaced with plain module-level consts,
+//    which are allocated once at module load instead of once per request -
+//    a real (if small) CPU saving on the hot path, and far less noise to
+//    read through.
+// 4. Dynamic per-provider model list: fetched from each provider's API,
+//    filtered to chat-capable models only, cached in a single shared KV
+//    key (`models_cache`). Refreshed only on explicit /updatemodels command
+//    or on the optional scheduled() Cron Trigger - never on the per-message
+//    hot path, so it adds zero background load to normal chat traffic.
 // ==========================================
 
 type KVNamespace = any;
@@ -25,6 +37,11 @@ const CONFIG = {
   KEYS_URL: "http://searchworker/api/keys",
   DEFAULT_SEARCH_DEPTH: "basic",
   DEFAULT_MAX_RESULTS: 5,
+  SETTINGS_KEY_PREFIX: "settings:",
+  HISTORY_KEY_PREFIX: "history_",
+  MODELS_CACHE_KEY: "models_cache",
+  MODELS_PER_PROVIDER_CAP: 10,
+  MODEL_FETCH_TIMEOUT_MS: 10000,
 } as const;
 
 export interface Env {
@@ -35,15 +52,8 @@ export interface Env {
   GOOGLE_API_KEY?: string;
   OPENAI_API_KEY?: string;
   COHERE_API_KEY?: string;
-  NVIDIA_API_KEY?: string; 
-  NVIDIA_API_BASE?: string; 
   TAVILY_PROXY_AUTH_KEY?: string;
   AI_PROVIDER?: string;
-}
-
-interface ProviderInfo {
-  name: string;
-  models: string[];
 }
 
 interface HistoryMessage {
@@ -65,206 +75,58 @@ interface ToolResponse {
   error?: string;
 }
 
-const PROVIDERS: Record<string, ProviderInfo> = {
-  gemini: {
-    name: "Google Gemini 🤖",
-    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"]
-  },
-  openai: {
-    name: "OpenAI ⚡",
-    models: ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
-  },
-  cohere: {
-    name: "Cohere 🔮",
-    models: [
-      "command-a-plus-05-2026", // דגם ה-MoE החדש והמתקדם ביותר של Cohere
-      "command-a-03-2025"       // דגם Command-A היעיל
-    ]
-  },
-  nvidia: {
-    name: "NVIDIA 🟢",
-    models: [
-      "nvidia/nemotron-3-super-120b-a12b", 
-      "openai/gpt-oss-120b"                  
-    ]
-  }
+interface ChatSettings {
+  provider: string;
+  model: string;
+  netOn: boolean;
+}
+
+interface ModelsCache {
+  gemini?: string[];
+  openai?: string[];
+  cohere?: string[];
+  updatedAt?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Static provider metadata + fallback model lists. These are the defaults
+// used until /updatemodels (or the Cron Trigger) populates the live KV
+// cache. They are also the safety net if a live fetch ever fails.
+// ---------------------------------------------------------------------------
+const PROVIDER_LABELS: Record<string, string> = {
+  gemini: "Google Gemini 🤖",
+  openai: "OpenAI ⚡",
+  cohere: "Cohere 🔮",
 };
 
-class AgentShareConfig {
-  AI_PROVIDER = "auto";
-  AI_IMAGE_PROVIDER = "auto";
-  SYSTEM_INIT_MESSAGE = null;
-}
+const PROVIDER_DEFAULTS = {
+  gemini: { apiBase: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-2.5-flash" },
+  openai: { apiBase: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
+  cohere: { apiBase: "https://api.cohere.com/v2", defaultModel: "command-r-plus" },
+} as const;
 
-class OpenAIConfig {
-  OPENAI_API_KEY: any[] = [];
-  OPENAI_CHAT_MODEL = "gpt-4o-mini";
-  OPENAI_API_BASE = "https://api.openai.com/v1";
-  OPENAI_API_EXTRA_PARAMS = {};
-  OPENAI_CHAT_MODELS_LIST = "";
-}
+const FALLBACK_MODELS: Record<string, string[]> = {
+  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"],
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
+  cohere: ["command-r-plus", "command-r", "command-r-08-2024"],
+};
 
-class DallEConfig {
-  DALL_E_MODEL = "dall-e-3";
-  DALL_E_IMAGE_SIZE = "1024x1024";
-  DALL_E_IMAGE_QUALITY = "standard";
-  DALL_E_IMAGE_STYLE = "vivid";
-  DALL_E_MODELS_LIST = '["dall-e-3"]';
-}
-
-class AzureConfig {
-  AZURE_API_KEY = null;
-  AZURE_RESOURCE_NAME = null;
-  AZURE_CHAT_MODEL = "gpt-4o-mini";
-  AZURE_IMAGE_MODEL = "dall-e-3";
-  AZURE_API_VERSION = "2024-06-01";
-  AZURE_CHAT_MODELS_LIST = "";
-  AZURE_CHAT_EXTRA_PARAMS = {};
-}
-
-class WorkersConfig {
-  CLOUDFLARE_ACCOUNT_ID = null;
-  CLOUDFLARE_TOKEN = null;
-  WORKERS_CHAT_MODEL = "@cf/qwen/qwen1.5-7b-chat-awq";
-  WORKERS_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
-  WORKERS_CHAT_MODELS_LIST = "";
-  WORKERS_IMAGE_MODELS_LIST = "";
-  WORKERS_CHAT_EXTRA_PARAMS = {};
-}
-
-class GeminiConfig {
-  GOOGLE_API_KEY = null;
-  GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
-  GOOGLE_CHAT_MODEL = "gemini-2.5-flash";
-  GOOGLE_CHAT_MODELS_LIST = "";
-  GOOGLE_CHAT_EXTRA_PARAMS = {};
-}
-
-class MistralConfig {
-  MISTRAL_API_KEY = null;
-  MISTRAL_API_BASE = "https://api.mistral.ai/v1";
-  MISTRAL_CHAT_MODEL = "mistral-tiny";
-  MISTRAL_CHAT_MODELS_LIST = "";
-  MISTRAL_CHAT_EXTRA_PARAMS = {};
-}
-
-class CohereConfig {
-  COHERE_API_KEY = null;
-  COHERE_API_BASE = "https://api.cohere.com/v2";
-  COHERE_CHAT_MODEL = "command-a-plus-05-2026"; // עודכן לברירת המחדל החדשה
-  COHERE_CHAT_MODELS_LIST = "";
-  COHERE_CHAT_EXTRA_PARAMS = {};
-}
-
-class AnthropicConfig {
-  ANTHROPIC_API_KEY = null;
-  ANTHROPIC_API_BASE = "https://api.anthropic.com/v1";
-  ANTHROPIC_CHAT_MODEL = "claude-3-5-haiku-latest";
-  ANTHROPIC_CHAT_MODELS_LIST = "";
-  ANTHROPIC_CHAT_EXTRA_PARAMS = {};
-}
-
-class DeepSeekConfig {
-  DEEPSEEK_API_KEY = null;
-  DEEPSEEK_API_BASE = "https://api.deepseek.com";
-  DEEPSEEK_CHAT_MODEL = "deepseek-chat";
-  DEEPSEEK_CHAT_MODELS_LIST = "";
-  DEEPSEEK_CHAT_EXTRA_PARAMS = {};
-}
-
-class GroqConfig {
-  GROQ_API_KEY = null;
-  GROQ_API_BASE = "https://api.groq.com/openai/v1";
-  GROQ_CHAT_MODEL = "groq-chat";
-  GROQ_CHAT_MODELS_LIST = "";
-  GROQ_CHAT_EXTRA_PARAMS = {};
-}
-
-class XAIConfig {
-  XAI_API_KEY = null;
-  XAI_API_BASE = "https://api.x.ai/v1";
-  XAI_CHAT_MODEL = "grok-2-latest";
-  XAI_CHAT_MODELS_LIST = "";
-  XAI_CHAT_EXTRA_PARAMS = {};
-}
-
-class NvidiaConfig {
-  NVIDIA_API_KEY = null;
-  NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"; 
-  NVIDIA_CHAT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
-  NVIDIA_CHAT_MODELS_LIST = "";
-  NVIDIA_CHAT_EXTRA_PARAMS = {};
-}
-
-class DefineKeys {
-  DEFINE_KEYS: any[] = [];
-}
-
-class EnvironmentConfig {
-  LANGUAGE = "he";
-  UPDATE_BRANCH = "master";
-  CHAT_COMPLETE_API_TIMEOUT = 0;
-  TELEGRAM_API_DOMAIN = "https://api.telegram.org";
-  TELEGRAM_AVAILABLE_TOKENS: any[] = [];
-  DEFAULT_PARSE_MODE = "Markdown";
-  TELEGRAM_MIN_STREAM_INTERVAL = 0;
-  TELEGRAM_PHOTO_SIZE_OFFSET = 1;
-  TELEGRAM_IMAGE_TRANSFER_MODE = "base64";
-  MODEL_LIST_COLUMNS = 1;
-  I_AM_A_GENEROUS_PERSON = false;
-  CHAT_WHITE_LIST: any[] = [];
-  LOCK_USER_CONFIG_KEYS = [
-    "OPENAI_API_BASE",
-    "GOOGLE_API_BASE",
-    "MISTRAL_API_BASE",
-    "COHERE_API_BASE",
-    "ANTHROPIC_API_BASE",
-    "DEEPSEEK_API_BASE",
-    "GROQ_API_BASE",
-    "XAI_API_BASE",
-    "NVIDIA_API_BASE"
-  ];
-  TELEGRAM_BOT_NAME: any[] = [];
-  CHAT_GROUP_WHITE_LIST: any[] = [];
-  GROUP_CHAT_BOT_ENABLE = true;
-  GROUP_CHAT_BOT_SHARE_MODE = true;
-  AUTO_TRIM_HISTORY = true;
-  MAX_HISTORY_LENGTH = CONFIG.MAX_HISTORY_LENGTH;
-  MAX_TOKEN_LENGTH = -1;
-  HISTORY_IMAGE_PLACEHOLDER = null;
-  HIDE_COMMAND_BUTTONS: any[] = [];
-  SHOW_REPLY_BUTTON = false;
-  EXTRA_MESSAGE_CONTEXT = false;
-  EXTRA_MESSAGE_MEDIA_COMPATIBLE = ["image"];
-  STREAM_MODE = false;
-  SAFE_MODE = true;
-  DEBUG_MODE = false;
-  DEV_MODE = false;
-  DEFAULT_NET_MODE = false;
-  NET_MODE_KEY_PREFIX = "net_mode_";
-}
-
+// =============================================================================
+// Telegram helpers
+// =============================================================================
 async function sendTelegramMessage(chatId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
-  const payload: TelegramPayload = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: "Markdown",
-  };
-  if (replyMarkup) {
-    payload.reply_markup = replyMarkup;
-  }
+  const payload: TelegramPayload = { chat_id: chatId, text, parse_mode: "Markdown" };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
 
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-
   let data: any = await response.json();
 
-  if (!data.ok && data.description && data.description.includes("can't find end of")) {
-    console.warn("Telegram Markdown parsing failed, falling back to plain text.");
+  if (!data.ok && data.description?.includes("can't find end of")) {
     delete payload.parse_mode;
     response = await fetch(url, {
       method: "POST",
@@ -273,32 +135,22 @@ async function sendTelegramMessage(chatId: number, text: string, token: string, 
     });
     data = await response.json();
   }
-
   return data;
 }
 
 async function editTelegramMessage(chatId: number, messageId: number, text: string, token: string, replyMarkup?: any): Promise<any> {
   const url = `https://api.telegram.org/bot${token}/editMessageText`;
-  const payload: TelegramPayload = {
-    chat_id: chatId,
-    message_id: messageId,
-    text: text,
-    parse_mode: "Markdown",
-  };
-  if (replyMarkup) {
-    payload.reply_markup = replyMarkup;
-  }
+  const payload: TelegramPayload = { chat_id: chatId, message_id: messageId, text, parse_mode: "Markdown" };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
 
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-
   let data: any = await response.json();
 
-  if (!data.ok && data.description && data.description.includes("can't find end of")) {
-    console.warn("Telegram edit Markdown parsing failed, falling back to plain text.");
+  if (!data.ok && data.description?.includes("can't find end of")) {
     delete payload.parse_mode;
     response = await fetch(url, {
       method: "POST",
@@ -307,7 +159,6 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
     });
     data = await response.json();
   }
-
   return data;
 }
 
@@ -319,38 +170,182 @@ function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
   return result;
 }
 
+// =============================================================================
+// Chat settings (KV) - consolidated single key per chat.
+// One read on the hot path (every message) instead of three.
+// =============================================================================
+async function getSettings(env: Env, chatId: number): Promise<ChatSettings> {
+  const raw = await env.DATABASE.get(`${CONFIG.SETTINGS_KEY_PREFIX}${chatId}`);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // fall through to defaults on corrupt data
+    }
+  }
+  const globalProvider = (env.AI_PROVIDER || "gemini").toLowerCase();
+  const provider = globalProvider === "auto" ? "gemini" : globalProvider;
+  const model = PROVIDER_DEFAULTS[provider as keyof typeof PROVIDER_DEFAULTS]?.defaultModel || PROVIDER_DEFAULTS.gemini.defaultModel;
+  return { provider, model, netOn: false };
+}
+
+async function updateSettings(env: Env, chatId: number, patch: Partial<ChatSettings>): Promise<ChatSettings> {
+  const current = await getSettings(env, chatId);
+  const updated: ChatSettings = { ...current, ...patch };
+  await env.DATABASE.put(`${CONFIG.SETTINGS_KEY_PREFIX}${chatId}`, JSON.stringify(updated));
+  return updated;
+}
+
+// =============================================================================
+// Dynamic model list cache (shared across all chats, single KV key)
+// =============================================================================
+async function getProviderModels(env: Env): Promise<Record<string, string[]>> {
+  const raw = await env.DATABASE.get(CONFIG.MODELS_CACHE_KEY);
+  let cache: ModelsCache = {};
+  if (raw) {
+    try {
+      cache = JSON.parse(raw);
+    } catch {
+      // ignore corrupt cache, fall back to defaults below
+    }
+  }
+  return {
+    gemini: cache.gemini?.length ? cache.gemini : FALLBACK_MODELS.gemini,
+    openai: cache.openai?.length ? cache.openai : FALLBACK_MODELS.openai,
+    cohere: cache.cohere?.length ? cache.cohere : FALLBACK_MODELS.cohere,
+  };
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchOpenAIModels(apiKey: string): Promise<string[]> {
+  const res = await fetchWithTimeout(
+    "https://api.openai.com/v1/models",
+    { headers: { Authorization: `Bearer ${apiKey}` } },
+    CONFIG.MODEL_FETCH_TIMEOUT_MS
+  );
+  if (!res.ok) throw new Error(`OpenAI models fetch failed: ${res.status}`);
+  const data: any = await res.json();
+  const list = (data.data || []) as Array<{ id: string; created?: number }>;
+  return list
+    .filter((m) => m.id.includes("gpt") && !m.id.includes(":") && !/audio|realtime|transcribe|tts|search/i.test(m.id))
+    .sort((a, b) => (b.created || 0) - (a.created || 0))
+    .slice(0, CONFIG.MODELS_PER_PROVIDER_CAP)
+    .map((m) => m.id);
+}
+
+async function fetchGeminiModels(apiKey: string): Promise<string[]> {
+  const res = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+    {},
+    CONFIG.MODEL_FETCH_TIMEOUT_MS
+  );
+  if (!res.ok) throw new Error(`Gemini models fetch failed: ${res.status}`);
+  const data: any = await res.json();
+  const list = (data.models || []) as Array<{ name: string; supportedGenerationMethods?: string[] }>;
+  return list
+    .filter((m) => m.supportedGenerationMethods?.includes("generateContent") && !m.name.includes("embedding"))
+    .slice(0, CONFIG.MODELS_PER_PROVIDER_CAP)
+    .map((m) => m.name.replace("models/", ""));
+}
+
+async function fetchCohereModels(apiKey: string): Promise<string[]> {
+  const res = await fetchWithTimeout(
+    "https://api.cohere.com/v1/models",
+    { headers: { Authorization: `Bearer ${apiKey}` } },
+    CONFIG.MODEL_FETCH_TIMEOUT_MS
+  );
+  if (!res.ok) throw new Error(`Cohere models fetch failed: ${res.status}`);
+  const data: any = await res.json();
+  const list = (data.models || []) as Array<{ name: string; endpoints?: string[] }>;
+  return list
+    .filter((m) => !m.endpoints || m.endpoints.includes("chat"))
+    .slice(0, CONFIG.MODELS_PER_PROVIDER_CAP)
+    .map((m) => m.name);
+}
+
+// Fetches only the providers that have a configured key, merges with the
+// existing cache (a provider whose fetch fails keeps its last known list
+// instead of being wiped), and writes once to KV.
+async function updateModelsJob(env: Env): Promise<string> {
+  const raw = await env.DATABASE.get(CONFIG.MODELS_CACHE_KEY);
+  let cache: ModelsCache = {};
+  if (raw) {
+    try {
+      cache = JSON.parse(raw);
+    } catch {
+      cache = {};
+    }
+  }
+
+  const errors: string[] = [];
+  let updatedCount = 0;
+
+  const geminiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
+  if (geminiKey) {
+    try {
+      cache.gemini = await fetchGeminiModels(geminiKey);
+      updatedCount++;
+    } catch (e: any) {
+      errors.push(`Gemini: ${e.message}`);
+    }
+  }
+
+  if (env.OPENAI_API_KEY) {
+    try {
+      cache.openai = await fetchOpenAIModels(env.OPENAI_API_KEY);
+      updatedCount++;
+    } catch (e: any) {
+      errors.push(`OpenAI: ${e.message}`);
+    }
+  }
+
+  if (env.COHERE_API_KEY) {
+    try {
+      cache.cohere = await fetchCohereModels(env.COHERE_API_KEY);
+      updatedCount++;
+    } catch (e: any) {
+      errors.push(`Cohere: ${e.message}`);
+    }
+  }
+
+  if (updatedCount === 0 && errors.length === 0) {
+    return "לא נמצאו מפתחות API פעילים לעדכון מודלים.";
+  }
+
+  cache.updatedAt = Date.now();
+  await env.DATABASE.put(CONFIG.MODELS_CACHE_KEY, JSON.stringify(cache));
+
+  let status = `✅ עודכנו ${updatedCount} ספקים בהצלחה.`;
+  if (errors.length) status += `\n⚠️ שגיאות: ${errors.join(" | ")}`;
+  return status;
+}
+
+// =============================================================================
+// Provider menu (inline keyboards) - reads live model cache, falls back to
+// static defaults automatically via getProviderModels().
+// =============================================================================
 async function sendProviderMenu(chatId: number, token: string, env: Env): Promise<void> {
   const buttons: any[] = [];
-
-  const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
-  const hasOpenAI = !!env.OPENAI_API_KEY;
-  const hasCohere = !!env.COHERE_API_KEY;
-  const hasNvidia = !!env.NVIDIA_API_KEY;
-
-  if (hasGemini) {
-    buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
-  }
-  if (hasOpenAI) {
-    buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
-  }
-  if (hasCohere) {
-    buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
-  }
-  if (hasNvidia) {
-    buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
-  }
+  if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) buttons.push({ text: PROVIDER_LABELS.gemini, callback_data: "select_provider:gemini" });
+  if (env.OPENAI_API_KEY) buttons.push({ text: PROVIDER_LABELS.openai, callback_data: "select_provider:openai" });
+  if (env.COHERE_API_KEY) buttons.push({ text: PROVIDER_LABELS.cohere, callback_data: "select_provider:cohere" });
 
   if (buttons.length === 0) {
-    buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
-    buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
-    buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
-    buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
+    for (const key of Object.keys(PROVIDER_LABELS)) {
+      buttons.push({ text: PROVIDER_LABELS[key], callback_data: `select_provider:${key}` });
+    }
   }
 
-  const keyboard = {
-    inline_keyboard: chunkButtons(buttons, 2)
-  };
-
+  const keyboard = { inline_keyboard: chunkButtons(buttons, 2) };
   await sendTelegramMessage(
     chatId,
     "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
@@ -359,49 +354,38 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   );
 }
 
+// =============================================================================
+// Web search plugin - calls the lean internal /tools/tavily-search endpoint.
+// No MCP envelope, no SSE, no handshake - see searchworker's own comments.
+// =============================================================================
 async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
-    console.error("SEARCH_SERVICE binding is missing in environment.");
     return "שגיאה פנימית: שירות החיפוש אינו מחובר (Service Binding חסר).";
   }
 
-  const authKey = env.TAVILY_PROXY_AUTH_KEY || "";
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), CONFIG.SEARCH_TIMEOUT_MS);
-
   try {
-    const response = await searchService.fetch(CONFIG.SEARCH_TOOL_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": authKey,
+    const response = await fetchWithTimeout(
+      CONFIG.SEARCH_TOOL_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" },
+        body: JSON.stringify({
+          query,
+          search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
+          max_results: CONFIG.DEFAULT_MAX_RESULTS,
+        }),
       },
-      body: JSON.stringify({
-        query: query,
-        search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
-        max_results: CONFIG.DEFAULT_MAX_RESULTS,
-      }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    const rawText = await response.text();
+      CONFIG.SEARCH_TIMEOUT_MS
+    );
 
     if (!response.ok) {
-      console.error(`[fetchWebSearch] HTTP ${response.status}: ${rawText.slice(0, 500)}`);
-      return `שגיאה בפנייה לשרת החיפוש: ${response.status} - ${rawText.slice(0, 500)}`;
+      const errBody = await response.text();
+      console.error(`[fetchWebSearch] HTTP ${response.status}: ${errBody.slice(0, 300)}`);
+      return `שגיאה בפנייה לשרת החיפוש: ${response.status}`;
     }
 
-    let payload: ToolResponse;
-    try {
-      payload = JSON.parse(rawText);
-    } catch {
-      console.error(`[fetchWebSearch] Non-JSON response: ${rawText.slice(0, 300)}`);
-      return `שגיאה: תשובה לא תקינה מהשרת: ${rawText.slice(0, 300)}`;
-    }
-
+    const payload: ToolResponse = await response.json();
     const textResult = payload.content?.[0]?.text;
 
     if (payload.isError) {
@@ -411,9 +395,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
 
     return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
   } catch (error: any) {
-    clearTimeout(timeoutId);
     if (error?.name === "AbortError") {
-      console.error("[fetchWebSearch] Timeout after 20s");
       return "שגיאה: החיפוש נמשך יותר מדי זמן וננטש (timeout).";
     }
     console.error("[fetchWebSearch] Exception:", error);
@@ -421,382 +403,228 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
   }
 }
 
-async function callGemini(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
-  const apiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
-  if (!apiKey) {
-    throw new Error("מפתח API של Gemini חסר (GEMINI_API_KEY).");
-  }
-
-  const modelConfig = new GeminiConfig();
-  const apiBase = modelConfig.GOOGLE_API_BASE;
-  const modelName = model || modelConfig.GOOGLE_CHAT_MODEL;
-
-  const url = `${apiBase}/models/${modelName}:generateContent?key=${apiKey}`;
-
-  const contents = history.map((msg: HistoryMessage) => ({
+// =============================================================================
+// LLM providers
+// =============================================================================
+async function callGemini(systemPrompt: string, history: HistoryMessage[], apiKey: string, model: string): Promise<string> {
+  const url = `${PROVIDER_DEFAULTS.gemini.apiBase}/models/${model}:generateContent?key=${apiKey}`;
+  const contents = history.map((msg) => ({
     role: msg.role === "assistant" || msg.role === "model" ? "model" : "user",
-    parts: [{ text: msg.content }]
+    parts: [{ text: msg.content }],
   }));
-
-  const payload = {
-    contents: contents,
-    systemInstruction: {
-      parts: [{ text: systemPrompt }]
-    },
-    generationConfig: {
-      temperature: 0.7
-    }
-  };
 
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      contents,
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: { temperature: 0.7 },
+    }),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API Error: ${errorText}`);
-  }
-
+  if (!response.ok) throw new Error(`Gemini API Error: ${await response.text()}`);
   const data: any = await response.json();
   const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!replyText) {
-    throw new Error("לא התקבלה תשובה תקינה מ-Gemini.");
-  }
+  if (!replyText) throw new Error("לא התקבלה תשובה תקינה מ-Gemini.");
   return replyText;
 }
 
-async function callOpenAI(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
-  const apiKey = env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("מפתח API של OpenAI חסר (OPENAI_API_KEY).");
-  }
-
-  const modelConfig = new OpenAIConfig();
-  const url = `${modelConfig.OPENAI_API_BASE}/chat/completions`;
-  const modelName = model || modelConfig.OPENAI_CHAT_MODEL;
-
+async function callOpenAI(systemPrompt: string, history: HistoryMessage[], apiKey: string, model: string): Promise<string> {
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg: HistoryMessage) => ({
-      role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
-      content: msg.content
-    }))
+    ...history.map((msg) => ({ role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user", content: msg.content })),
   ];
 
-  const response = await fetch(url, {
+  const response = await fetch(`${PROVIDER_DEFAULTS.openai.apiBase}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: modelName,
-      messages: messages,
-      temperature: 0.7
-    })
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages, temperature: 0.7 }),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI API Error: ${errorText}`);
-  }
-
+  if (!response.ok) throw new Error(`OpenAI API Error: ${await response.text()}`);
   const data: any = await response.json();
   const replyText = data.choices?.[0]?.message?.content;
-  if (!replyText) {
-    throw new Error("לא התקבלה תשובה תקינה מ-OpenAI.");
-  }
+  if (!replyText) throw new Error("לא התקבלה תשובה תקינה מ-OpenAI.");
   return replyText;
 }
 
-async function callCohere(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
-  const apiKey = env.COHERE_API_KEY;
-  if (!apiKey) {
-    throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
-  }
-
-  const modelConfig = new CohereConfig();
-  const url = `${modelConfig.COHERE_API_BASE}/chat`;
-  const modelName = model || modelConfig.COHERE_CHAT_MODEL;
-
+async function callCohere(systemPrompt: string, history: HistoryMessage[], apiKey: string, model: string): Promise<string> {
   const messages = [
     { role: "system", content: systemPrompt },
-    ...history.map((msg: HistoryMessage) => ({
-      role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
-      content: msg.content
-    }))
+    ...history.map((msg) => ({ role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user", content: msg.content })),
   ];
 
-  const response = await fetch(url, {
+  const response = await fetch(`${PROVIDER_DEFAULTS.cohere.apiBase}/chat`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: modelName,
-      messages: messages
-    })
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages }),
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Cohere API Error: ${errorText}`);
-  }
-
+  if (!response.ok) throw new Error(`Cohere API Error: ${await response.text()}`);
   const data: any = await response.json();
-
   let replyText = "";
-  if (data.message?.content) {
-    if (Array.isArray(data.message.content)) {
-      replyText = data.message.content[0]?.text || "";
-    } else if (typeof data.message.content === "string") {
-      replyText = data.message.content;
-    }
-  }
-
-  if (!replyText) {
-    throw new Error("לא התקבלה תשובה תקינה מ-Cohere.");
-  }
-
-  return replyText;
-}
-
-async function callNvidia(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
-  const apiKey = env.NVIDIA_API_KEY;
-  if (!apiKey) {
-    throw new Error("מפתח API של NVIDIA חסר (NVIDIA_API_KEY).");
-  }
-
-  const modelConfig = new NvidiaConfig();
-  const apiBase = env.NVIDIA_API_BASE || modelConfig.NVIDIA_API_BASE;
-  const url = `${apiBase}/chat/completions`;
-  const modelName = model || modelConfig.NVIDIA_CHAT_MODEL;
-
-  const messages = [
-    { role: "system", content: systemPrompt },
-    ...history.map((msg: HistoryMessage) => ({
-      role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
-      content: msg.content
-    }))
-  ];
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: modelName,
-      messages: messages,
-      temperature: 0.7
-    })
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`NVIDIA API Error: ${errorText}`);
-  }
-
-  const data: any = await response.json();
-  const replyText = data.choices?.[0]?.message?.content;
-  if (!replyText) {
-    throw new Error("לא התקבלה תשובה תקינה מ-NVIDIA.");
-  }
+  if (Array.isArray(data.message?.content)) replyText = data.message.content[0]?.text || "";
+  else if (typeof data.message?.content === "string") replyText = data.message.content;
+  if (!replyText) throw new Error("לא התקבלה תשובה תקינה מ-Cohere.");
   return replyText;
 }
 
 async function callLLM(systemPrompt: string, history: HistoryMessage[], env: Env, provider: string, model: string): Promise<string> {
   if (provider === "openai") {
-    return await callOpenAI(systemPrompt, history, env, model);
-  } else if (provider === "cohere") {
-    return await callCohere(systemPrompt, history, env, model);
-  } else if (provider === "nvidia") {
-    return await callNvidia(systemPrompt, history, env, model);
-  } else {
-    return await callGemini(systemPrompt, history, env, model);
+    if (!env.OPENAI_API_KEY) throw new Error("מפתח API של OpenAI חסר (OPENAI_API_KEY).");
+    return callOpenAI(systemPrompt, history, env.OPENAI_API_KEY, model);
   }
+  if (provider === "cohere") {
+    if (!env.COHERE_API_KEY) throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
+    return callCohere(systemPrompt, history, env.COHERE_API_KEY, model);
+  }
+  const geminiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
+  if (!geminiKey) throw new Error("מפתח API של Gemini חסר (GEMINI_API_KEY).");
+  return callGemini(systemPrompt, history, geminiKey, model);
 }
 
+// =============================================================================
+// Background message handler (runs inside ctx.waitUntil - exactly one task
+// per incoming message, no parallel background work spawned).
+// =============================================================================
 async function handleMessageAndReply(chatId: number, text: string, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   if (!token) return;
 
   try {
-    const isNetOn = (await env.DATABASE.get(`net_mode_${chatId}`)) === "true";
-
-    const globalProvider = (env.AI_PROVIDER || "gemini").toLowerCase();
-    const defaultProvider = globalProvider === "auto" ? "gemini" : globalProvider;
-    const userProvider = (await env.DATABASE.get(`user_provider_${chatId}`)) || defaultProvider;
-
-    let defaultModel = "gemini-2.5-flash";
-    if (userProvider === "openai") defaultModel = "gpt-4o-mini";
-    if (userProvider === "cohere") defaultModel = "command-a-plus-05-2026"; // ברירת המחדל עודכנה ל-Command-A+
-    if (userProvider === "nvidia") defaultModel = "nvidia/nemotron-3-super-120b-a12b";
-
-    const userModel = (await env.DATABASE.get(`user_model_${chatId}`)) || defaultModel;
+    // Single KV read for provider + model + net-search-mode (was 3 reads).
+    const settings = await getSettings(env, chatId);
 
     let searchResults = "";
     let tempMessageId: number | null = null;
 
-    if (isNetOn) {
+    if (settings.netOn) {
       const tempMsg = await sendTelegramMessage(chatId, "🔄 *מחפש מידע עדכני באינטרנט...*", token);
-      if (tempMsg && tempMsg.result) {
-        tempMessageId = tempMsg.result.message_id;
-      }
-
+      tempMessageId = tempMsg?.result?.message_id ?? null;
       searchResults = await fetchWebSearch(text, env);
     }
 
     let history: HistoryMessage[] = [];
-    const rawHistory = await env.DATABASE.get(`history_${chatId}`);
+    const rawHistory = await env.DATABASE.get(`${CONFIG.HISTORY_KEY_PREFIX}${chatId}`);
     if (rawHistory) {
       try {
         history = JSON.parse(rawHistory);
-      } catch (_) {}
+      } catch {
+        history = [];
+      }
     }
 
     history.push({ role: "user", content: text });
 
     let systemPrompt = CONFIG.DEFAULT_SYSTEM_PROMPT;
-    if (isNetOn && searchResults) {
+    if (settings.netOn && searchResults) {
       systemPrompt += `\n\n[USER SEARCH CONTEXT]\nלהלן מידע עדכני שנמצא ברשת לגבי שאלת המשתמש. השתמש בו כדי לענות בצורה מבוססת ומדויקת:\n\n${searchResults}`;
     }
 
-    let botReply = "";
+    let botReply: string;
     try {
-      botReply = await callLLM(systemPrompt, history, env, userProvider, userModel);
+      botReply = await callLLM(systemPrompt, history, env, settings.provider, settings.model);
     } catch (error: any) {
       console.error("LLM Call Error:", error);
       botReply = `מצטער, חלה שגיאה בעיבוד התשובה: ${error.message}`;
     }
 
     history.push({ role: "model", content: botReply });
-    const envConfig = new EnvironmentConfig();
-    if (history.length > envConfig.MAX_HISTORY_LENGTH) {
-      history = history.slice(history.length - envConfig.MAX_HISTORY_LENGTH);
+    if (history.length > CONFIG.MAX_HISTORY_LENGTH) {
+      history = history.slice(history.length - CONFIG.MAX_HISTORY_LENGTH);
     }
 
-    await env.DATABASE.put(`history_${chatId}`, JSON.stringify(history), { expirationTtl: CONFIG.HISTORY_TTL_SECONDS });
+    await env.DATABASE.put(`${CONFIG.HISTORY_KEY_PREFIX}${chatId}`, JSON.stringify(history), { expirationTtl: CONFIG.HISTORY_TTL_SECONDS });
 
-    if (isNetOn && tempMessageId) {
+    if (settings.netOn && tempMessageId) {
       await editTelegramMessage(chatId, tempMessageId, botReply, token);
     } else {
       await sendTelegramMessage(chatId, botReply, token);
     }
-
   } catch (err) {
     console.error("Error in background task handler:", err);
   }
 }
 
+// =============================================================================
+// Inline keyboard callback handler
+// =============================================================================
 async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   const chatId = callbackQuery.message.chat.id;
   const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data || "";
 
-  const answerUrl = `https://api.telegram.org/bot${token}/answerCallbackQuery`;
-  await fetch(answerUrl, {
+  // Acknowledge immediately to clear the Telegram loading spinner.
+  await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callback_query_id: callbackQuery.id })
+    body: JSON.stringify({ callback_query_id: callbackQuery.id }),
   });
 
   try {
     if (data.startsWith("select_provider:")) {
       const provider = data.split(":")[1];
-      const providerInfo = PROVIDERS[provider];
-      if (!providerInfo) return;
+      const label = PROVIDER_LABELS[provider];
+      if (!label) return;
 
-      const keyboardRows = providerInfo.models.map((model: string) => {
-        return [{ text: `🤖 ${model}`, callback_data: `select_model:${provider}:${model}` }];
-      });
+      const modelsByProvider = await getProviderModels(env);
+      const models = modelsByProvider[provider] || FALLBACK_MODELS[provider] || [];
+
+      const keyboardRows = models.map((model) => [{ text: `🤖 ${model}`, callback_data: `select_model:${provider}:${model}` }]);
       keyboardRows.push([{ text: "🔙 חזור לספקים", callback_data: "back_to_providers" }]);
 
-      const keyboard = { inline_keyboard: keyboardRows };
       await editTelegramMessage(
         chatId,
         messageId,
-        `⚙️ **תפריט דגמי ${providerInfo.name}**\nבחר את דגם המודל המועדף עליך מתוך הרשימה הבאה:`,
+        `⚙️ **תפריט דגמי ${label}**\nבחר את דגם המודל המועדף עליך מתוך הרשימה הבאה:`,
         token,
-        keyboard
+        { inline_keyboard: keyboardRows }
       );
-    }
+    } else if (data.startsWith("select_model:")) {
+      const [, provider, model] = data.split(":");
+      await updateSettings(env, chatId, { provider, model });
 
-    else if (data.startsWith("select_model:")) {
-      const parts = data.split(":");
-      const provider = parts[1];
-      const model = parts[2];
-
-      await env.DATABASE.put(`user_provider_${chatId}`, provider);
-      await env.DATABASE.put(`user_model_${chatId}`, model);
-
-      let providerEmoji = "🤖";
-      if (provider === "openai") providerEmoji = "⚡";
-      if (provider === "cohere") providerEmoji = "🔮";
-      if (provider === "nvidia") providerEmoji = "🟢";
-
-      const providerName = PROVIDERS[provider]?.name || provider;
+      const providerName = PROVIDER_LABELS[provider] || provider;
       await editTelegramMessage(
         chatId,
         messageId,
-        `${providerEmoji} **הגדרות המודל עודכנו בהצלחה!**\n\n` +
-        `🤖 ספק מוגדר: **${providerName}**\n` +
-        `🎯 מודל פעיל: \`${model}\`\n\n` +
-        `מעתה, כל הודעות השיחה והחיפושים הבאים שלך ישתמשו במודל זה.`,
+        `✅ **הגדרות המודל עודכנו בהצלחה!**\n\n🤖 ספק מוגדר: **${providerName}**\n🎯 מודל פעיל: \`${model}\`\n\nמעתה, כל הודעות השיחה והחיפושים הבאים שלך ישתמשו במודל זה.`,
         token
       );
+    } else if (data === "back_to_providers") {
+      await sendProviderMenuInline(chatId, messageId, token, env);
     }
-
-    else if (data === "back_to_providers") {
-      const buttons: any[] = [];
-      const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
-      const hasOpenAI = !!env.OPENAI_API_KEY;
-      const hasCohere = !!env.COHERE_API_KEY;
-      const hasNvidia = !!env.NVIDIA_API_KEY;
-
-      if (hasGemini) {
-        buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
-      }
-      if (hasOpenAI) {
-        buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
-      }
-      if (hasCohere) {
-        buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
-      }
-      if (hasNvidia) {
-        buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
-      }
-
-      if (buttons.length === 0) {
-        buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
-        buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
-        buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
-        buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
-      }
-
-      const keyboard = {
-        inline_keyboard: chunkButtons(buttons, 2)
-      };
-
-      await editTelegramMessage(
-        chatId,
-        messageId,
-        "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
-        token,
-        keyboard
-      );
-    }
-
   } catch (error) {
     console.error("Callback Query Error:", error);
   }
 }
 
+async function sendProviderMenuInline(chatId: number, messageId: number, token: string, env: Env): Promise<void> {
+  const buttons: any[] = [];
+  if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) buttons.push({ text: PROVIDER_LABELS.gemini, callback_data: "select_provider:gemini" });
+  if (env.OPENAI_API_KEY) buttons.push({ text: PROVIDER_LABELS.openai, callback_data: "select_provider:openai" });
+  if (env.COHERE_API_KEY) buttons.push({ text: PROVIDER_LABELS.cohere, callback_data: "select_provider:cohere" });
+
+  if (buttons.length === 0) {
+    for (const key of Object.keys(PROVIDER_LABELS)) {
+      buttons.push({ text: PROVIDER_LABELS[key], callback_data: `select_provider:${key}` });
+    }
+  }
+
+  await editTelegramMessage(
+    chatId,
+    messageId,
+    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
+    token,
+    { inline_keyboard: chunkButtons(buttons, 2) }
+  );
+}
+
+// =============================================================================
+// Worker entry point
+// =============================================================================
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {
     if (request.method !== "POST") {
@@ -816,92 +644,102 @@ export default {
         return new Response("OK", { status: 200 });
       }
 
-      if (update.message && update.message.chat) {
-        const message = update.message;
-        const chatId = message.chat.id;
-        const text = (message.text || "").trim();
+      if (update.message?.chat) {
+        const chatId = update.message.chat.id;
+        const text = (update.message.text || "").trim();
 
-        if (text === "/start") {
-          const welcomeText =
-            "שלום! אני בוט הכל-יכול שלך. 🤖✨\n\n" +
-            "פקודות זמינות לשימוש:\n" +
-            "⚙️ /models - תפריט בחירה והחלפת מודלים\n" +
-            "📊 /balance - בדיקת יתרת קרדיטים ב-Tavily API\n" +
-            "🔍 /neton - הפעלת מצב חיפוש באינטרנט\n" +
-            "💬 /netoff - כיבוי מצב חיפוש וחזרה לשיחה רגילה\n" +
-            "🧹 /clear או /reset - איפוס מיידי של היסטוריית השיחה הנוכחית";
-
-          await sendTelegramMessage(chatId, welcomeText, token);
-          return new Response("OK", { status: 200 });
-        }
-
-        if (text === "/neton") {
-          await env.DATABASE.put(`net_mode_${chatId}`, "true");
-          await sendTelegramMessage(chatId, "🔍 **מצב חיפוש אינטרנט הופעל בהצלחה!**\nהשאילתות הבאות שלך יחופשו ברשת וייענו על בסיס תוצאות עדכניות.", token);
-          return new Response("OK", { status: 200 });
-        }
-
-        if (text === "/netoff") {
-          await env.DATABASE.put(`net_mode_${chatId}`, "false");
-          await sendTelegramMessage(chatId, "💬 **מצב חיפוש אינטרנט כבוי.**\nחוזר למצב שיחה רגיל מול המודל.", token);
-          return new Response("OK", { status: 200 });
-        }
-
-        if (text === "/clear" || text === "/reset") {
-          await env.DATABASE.delete(`history_${chatId}`);
-          await sendTelegramMessage(chatId, "🧹 **היסטוריית השיחה אופסה בהצלחה.**", token);
-          return new Response("OK", { status: 200 });
-        }
-
-        if (text === "/models") {
-          await sendProviderMenu(chatId, token, env);
-          return new Response("OK", { status: 200 });
-        }
-
-        if (text === "/balance") {
-          const searchService = env.SEARCH_SERVICE;
-          if (!searchService) {
-            await sendTelegramMessage(chatId, "⚠️ **שגיאה:** שירות החיפוש (`SEARCH_SERVICE`) אינו מחובר לבוט הראשי.", token);
+        switch (text) {
+          case "/start": {
+            const welcomeText =
+              "שלום! אני בוט הכל-יכול שלך. 🤖✨\n\n" +
+              "פקודות זמינות לשימוש:\n" +
+              "⚙️ /models - תפריט בחירה והחלפת מודלים\n" +
+              "🔄 /updatemodels - עדכון רשימת המודלים מהספקים\n" +
+              "📊 /balance - בדיקת יתרת קרדיטים ב-Tavily API\n" +
+              "🔍 /neton - הפעלת מצב חיפוש באינטרנט\n" +
+              "💬 /netoff - כיבוי מצב חיפוש וחזרה לשיחה רגילה\n" +
+              "🧹 /clear או /reset - איפוס מיידי של היסטוריית השיחה הנוכחית";
+            await sendTelegramMessage(chatId, welcomeText, token);
             return new Response("OK", { status: 200 });
           }
 
-          const res = await searchService.fetch(CONFIG.KEYS_URL, {
-            headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" }
-          });
-
-          if (!res.ok) {
-            const errBody = await res.text();
-            await sendTelegramMessage(chatId, `⚠️ **שגיאה מה-Proxy של החיפושים:**\n\nסטטוס: \`${res.status}\`\nתשובה: \`${errBody}\``, token);
+          case "/neton": {
+            await updateSettings(env, chatId, { netOn: true });
+            await sendTelegramMessage(chatId, "🔍 **מצב חיפוש אינטרנט הופעל בהצלחה!**\nהשאילתות הבאות שלך יחופשו ברשת וייענו על בסיס תוצאות עדכניות.", token);
             return new Response("OK", { status: 200 });
           }
 
-          const data: any = await res.json();
-          const keys = data.keys;
-
-          if (!keys || !Array.isArray(keys)) {
-            await sendTelegramMessage(chatId, `⚠️ **שגיאה:** ה-Proxy החזיר נתון שאינו תואם למבנה הנדרש.\n\nנתון גולמי: \`${JSON.stringify(data)}\``, token);
+          case "/netoff": {
+            await updateSettings(env, chatId, { netOn: false });
+            await sendTelegramMessage(chatId, "💬 **מצב חיפוש אינטרנט כבוי.**\nחוזר למצב שיחה רגיל מול המודל.", token);
             return new Response("OK", { status: 200 });
           }
 
-          const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
+          case "/clear":
+          case "/reset": {
+            await env.DATABASE.delete(`${CONFIG.HISTORY_KEY_PREFIX}${chatId}`);
+            await sendTelegramMessage(chatId, "🧹 **היסטוריית השיחה אופסה בהצלחה.**", token);
+            return new Response("OK", { status: 200 });
+          }
 
-          await sendTelegramMessage(chatId, msg, token);
-          return new Response("OK", { status: 200 });
+          case "/models": {
+            await sendProviderMenu(chatId, token, env);
+            return new Response("OK", { status: 200 });
+          }
+
+          case "/updatemodels": {
+            // Runs inline (not via waitUntil) since the user is waiting for
+            // a direct status reply; it's an explicit, infrequent command,
+            // not hot-path traffic.
+            const status = await updateModelsJob(env);
+            await sendTelegramMessage(chatId, `🔄 **עדכון רשימת מודלים**\n\n${status}`, token);
+            return new Response("OK", { status: 200 });
+          }
+
+          case "/balance": {
+            const searchService = env.SEARCH_SERVICE;
+            if (!searchService) {
+              await sendTelegramMessage(chatId, "⚠️ **שגיאה:** שירות החיפוש (`SEARCH_SERVICE`) אינו מחובר לבוט הראשי.", token);
+              return new Response("OK", { status: 200 });
+            }
+            const res = await searchService.fetch(CONFIG.KEYS_URL, { headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" } });
+            if (!res.ok) {
+              await sendTelegramMessage(chatId, `⚠️ **שגיאה מה-Proxy של החיפושים:** סטטוס \`${res.status}\``, token);
+              return new Response("OK", { status: 200 });
+            }
+            const data: any = await res.json();
+            const keys = data.keys;
+            if (!Array.isArray(keys)) {
+              await sendTelegramMessage(chatId, "⚠️ **שגיאה:** ה-Proxy החזיר נתון שאינו תואם למבנה הנדרש.", token);
+              return new Response("OK", { status: 200 });
+            }
+            const msg = `📊 **Tavily Credits:**\n` + keys.map((k: any) => `🔑 \`${k.apiKey.slice(0, 8)}...${k.apiKey.slice(-4)}\`: *${(k.remainingCredit || 0).toLocaleString()}*`).join("\n");
+            await sendTelegramMessage(chatId, msg, token);
+            return new Response("OK", { status: 200 });
+          }
+
+          default: {
+            if (!text) return new Response("OK", { status: 200 });
+            ctx.waitUntil(handleMessageAndReply(chatId, text, env));
+            return new Response("OK", { status: 200 });
+          }
         }
-
-        if (!text) {
-          return new Response("OK", { status: 200 });
-        }
-
-        ctx.waitUntil(handleMessageAndReply(chatId, text, env));
-        return new Response("OK", { status: 200 });
       }
-
-    } catch (err: any) {
+    } catch (err) {
       console.error("Worker Global Error:", err);
       return new Response("OK", { status: 200 });
     }
 
     return new Response("OK", { status: 200 });
-  }
+  },
+
+  // Optional Cron Trigger handler for fully automatic model-list refresh.
+  // Add to wrangler.toml to enable, e.g.:
+  //   [triggers]
+  //   crons = ["0 3 * * *"]   # daily at 03:00 UTC
+  // This runs as its own isolated invocation - it never touches the
+  // per-message hot path or its CPU/subrequest budget.
+  async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
+    ctx.waitUntil(updateModelsJob(env));
+  },
 };
