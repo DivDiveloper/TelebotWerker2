@@ -438,7 +438,7 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
 // ==========================================
 // 4. פנייה לוורקר החיפוש (MCP) - עם תמיכה ב-JSON וב-SSE + Timeout
 // ==========================================
-async function fetchWebSearch(query: string, env: Env): Promise<string> {
+async function fetchWebSearch(query, env) {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
     console.error("SEARCH_SERVICE binding is missing in environment.");
@@ -450,12 +450,13 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 שניות מקסימום
 
   try {
+    // יצירת מזהה בקשה דינמי כדי למנוע התנגשויות (ID Collision) בשרת
+    const requestId = Math.floor(Math.random() * 1000000);
+
     const response = await searchService.fetch("http://searchworker/mcp", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // חובה לכלול את שני הסוגים - StreamableHTTPServerTransport מחזיר 400
-        // אם רק אחד מהם קיים ב-Accept header.
         "Accept": "application/json, text/event-stream",
         "x-api-key": authKey,
       },
@@ -463,19 +464,29 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
         jsonrpc: "2.0",
         method: "tools/call",
         params: {
-          name: "tavily-search", // מקף - חייב להתאים בדיוק לשם הכלי הרשום בשרת ה-MCP
+          name: "tavily_search", // תיקון: קו תחתון (_) במקום מקף (-) בהתאם לריפו
           arguments: {
-            query: query
+            query: query,
+            search_depth: "basic", // הוספת ארגומנט חובה/מומלץ לפרוקסי
+            max_results: 5
           }
         },
-        id: 1
+        id: requestId
       }),
       signal: controller.signal,
     });
 
     clearTimeout(timeoutId);
 
+    // קריאת התשובה הגולמית מהשרת
     const rawText = await response.text();
+
+    // ==========================================
+    // לוג זמני לדיבאג (ניתן להסרה לאחר שהחיפוש עובד)
+    // לוג זה ידפיס לטרמינל/לקונסול של Cloudflare את התשובה המדויקת של השרת
+    console.log(`[DEBUG] Search Response Status: ${response.status}`);
+    console.log(`[DEBUG] Search Response Raw Body: ${rawText}`);
+    // ==========================================
 
     if (!response.ok) {
       console.error(`[fetchWebSearch] HTTP ${response.status}: ${rawText.slice(0, 500)}`);
@@ -483,17 +494,15 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
     }
 
     const contentType = response.headers.get("content-type") || "";
-    let jsonPayload: any = null;
+    let jsonPayload = null;
 
     if (contentType.includes("application/json")) {
-      // תשובת JSON חד-פעמית (stateless, ללא session)
       try {
         jsonPayload = JSON.parse(rawText);
       } catch (e) {
         return `שגיאה: לא ניתן לפענח תשובת JSON מהשרת: ${rawText.slice(0, 300)}`;
       }
     } else if (contentType.includes("text/event-stream")) {
-      // תשובת SSE - לחלץ את שורת ה-data האחרונה שמכילה payload תקין
       const lines = rawText.split("\n");
       for (const line of lines) {
         const trimmed = line.trim();
@@ -503,12 +512,11 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
           try {
             jsonPayload = JSON.parse(dataStr);
           } catch (_) {
-            // התעלמות משורות חלקיות/לא תקינות
+            // התעלמות משורות חלקיות
           }
         }
       }
     } else {
-      // גיבוי: ניסיון לפרש כ-JSON בכל מקרה
       try {
         jsonPayload = JSON.parse(rawText);
       } catch {
@@ -526,6 +534,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
       return `שגיאת MCP: ${jsonPayload.error.message || JSON.stringify(jsonPayload.error)}`;
     }
 
+    // חילוץ התוכן מתוך מבנה ה-MCP הסטנדרטי
     const textResult = jsonPayload.result?.content?.[0]?.text;
 
     if (jsonPayload.result?.isError) {
@@ -533,14 +542,14 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
     }
 
     return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
-  } catch (error: any) {
+  } catch (error) {
     clearTimeout(timeoutId);
     if (error?.name === "AbortError") {
       console.error("[fetchWebSearch] Timeout after 20s");
       return "שגיאה: החיפוש נמשך יותר מדי זמן וננטש (timeout).";
     }
     console.error("Search failed:", error);
-    return `שגיאה במהלך ביצוע החיפוש: ${error?.message || String(error)}`;
+    return `שגיאת מערכת חריגה: ${error?.message || error}`;
   }
 }
 
