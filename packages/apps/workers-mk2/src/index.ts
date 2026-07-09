@@ -20,7 +20,7 @@ type Fetcher = any;
 export interface Env {
   DATABASE: KVNamespace;
   SEARCH_SERVICE?: Fetcher; // Service Binding לוורקר החיפוש
-  
+
   // משתני סביבה ראשיים
   TELEGRAM_BOT_TOKEN?: string;
   GEMINI_API_KEY?: string;
@@ -51,272 +51,150 @@ const PROVIDERS: any = {
 // 2. מחלקות ההגדרה המקוריות של הפרויקט
 // ==========================================
 class AgentShareConfig {
-  AI_PROVIDER: string;
-  AI_IMAGE_PROVIDER: string;
-  SYSTEM_INIT_MESSAGE: any;
-  constructor() {
-    this.AI_PROVIDER = "auto";
-    this.AI_IMAGE_PROVIDER = "auto";
-    this.SYSTEM_INIT_MESSAGE = null;
-  }
+  AI_PROVIDER = "auto";
+  AI_IMAGE_PROVIDER = "auto";
+  SYSTEM_INIT_MESSAGE = null;
 }
 
 class OpenAIConfig {
-  OPENAI_API_KEY: any[];
-  OPENAI_CHAT_MODEL: string;
-  OPENAI_API_BASE: string;
-  OPENAI_API_EXTRA_PARAMS: any;
-  OPENAI_CHAT_MODELS_LIST: string;
-  constructor() {
-    this.OPENAI_API_KEY = [];
-    this.OPENAI_CHAT_MODEL = "gpt-4o-mini";
-    this.OPENAI_API_BASE = "https://api.openai.com/v1";
-    this.OPENAI_API_EXTRA_PARAMS = {};
-    this.OPENAI_CHAT_MODELS_LIST = "";
-  }
+  OPENAI_API_KEY: any[] = [];
+  OPENAI_CHAT_MODEL = "gpt-4o-mini";
+  OPENAI_API_BASE = "https://api.openai.com/v1";
+  OPENAI_API_EXTRA_PARAMS = {};
+  OPENAI_CHAT_MODELS_LIST = "";
 }
 
 class DallEConfig {
-  DALL_E_MODEL: string;
-  DALL_E_IMAGE_SIZE: string;
-  DALL_E_IMAGE_QUALITY: string;
-  DALL_E_IMAGE_STYLE: string;
-  DALL_E_MODELS_LIST: string;
-  constructor() {
-    this.DALL_E_MODEL = "dall-e-3";
-    this.DALL_E_IMAGE_SIZE = "1024x1024";
-    this.DALL_E_IMAGE_QUALITY = "standard";
-    this.DALL_E_IMAGE_STYLE = "vivid";
-    this.DALL_E_MODELS_LIST = '["dall-e-3"]';
-  }
+  DALL_E_MODEL = "dall-e-3";
+  DALL_E_IMAGE_SIZE = "1024x1024";
+  DALL_E_IMAGE_QUALITY = "standard";
+  DALL_E_IMAGE_STYLE = "vivid";
+  DALL_E_MODELS_LIST = '["dall-e-3"]';
 }
 
 class AzureConfig {
-  AZURE_API_KEY: any;
-  AZURE_RESOURCE_NAME: any;
-  AZURE_CHAT_MODEL: string;
-  AZURE_IMAGE_MODEL: string;
-  AZURE_API_VERSION: string;
-  AZURE_CHAT_MODELS_LIST: string;
-  AZURE_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.AZURE_API_KEY = null;
-    this.AZURE_RESOURCE_NAME = null;
-    this.AZURE_CHAT_MODEL = "gpt-4o-mini";
-    this.AZURE_IMAGE_MODEL = "dall-e-3";
-    this.AZURE_API_VERSION = "2024-06-01";
-    this.AZURE_CHAT_MODELS_LIST = "";
-    this.AZURE_CHAT_EXTRA_PARAMS = {};
-  }
+  AZURE_API_KEY = null;
+  AZURE_RESOURCE_NAME = null;
+  AZURE_CHAT_MODEL = "gpt-4o-mini";
+  AZURE_IMAGE_MODEL = "dall-e-3";
+  AZURE_API_VERSION = "2024-06-01";
+  AZURE_CHAT_MODELS_LIST = "";
+  AZURE_CHAT_EXTRA_PARAMS = {};
 }
 
 class WorkersConfig {
-  CLOUDFLARE_ACCOUNT_ID: any;
-  CLOUDFLARE_TOKEN: any;
-  WORKERS_CHAT_MODEL: string;
-  WORKERS_IMAGE_MODEL: string;
-  WORKERS_CHAT_MODELS_LIST: string;
-  WORKERS_IMAGE_MODELS_LIST: string;
-  WORKERS_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.CLOUDFLARE_ACCOUNT_ID = null;
-    this.CLOUDFLARE_TOKEN = null;
-    this.WORKERS_CHAT_MODEL = "@cf/qwen/qwen1.5-7b-chat-awq";
-    this.WORKERS_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
-    this.WORKERS_CHAT_MODELS_LIST = "";
-    this.WORKERS_IMAGE_MODELS_LIST = "";
-    this.WORKERS_CHAT_EXTRA_PARAMS = {};
-  }
+  CLOUDFLARE_ACCOUNT_ID = null;
+  CLOUDFLARE_TOKEN = null;
+  WORKERS_CHAT_MODEL = "@cf/qwen/qwen1.5-7b-chat-awq";
+  WORKERS_IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
+  WORKERS_CHAT_MODELS_LIST = "";
+  WORKERS_IMAGE_MODELS_LIST = "";
+  WORKERS_CHAT_EXTRA_PARAMS = {};
 }
 
 class GeminiConfig {
-  GOOGLE_API_KEY: any;
-  GOOGLE_API_BASE: string;
-  GOOGLE_CHAT_MODEL: string;
-  GOOGLE_CHAT_MODELS_LIST: string;
-  GOOGLE_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.GOOGLE_API_KEY = null;
-    this.GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
-    this.GOOGLE_CHAT_MODEL = "gemini-2.5-flash"; // מודל ברירת מחדל עדכני ותקין
-    this.GOOGLE_CHAT_MODELS_LIST = "";
-    this.GOOGLE_CHAT_EXTRA_PARAMS = {};
-  }
+  GOOGLE_API_KEY = null;
+  GOOGLE_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+  GOOGLE_CHAT_MODEL = "gemini-2.5-flash"; // מודל ברירת מחדל עדכני ותקין
+  GOOGLE_CHAT_MODELS_LIST = "";
+  GOOGLE_CHAT_EXTRA_PARAMS = {};
 }
 
 class MistralConfig {
-  MISTRAL_API_KEY: any;
-  MISTRAL_API_BASE: string;
-  MISTRAL_CHAT_MODEL: string;
-  MISTRAL_CHAT_MODELS_LIST: string;
-  MISTRAL_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.MISTRAL_API_KEY = null;
-    this.MISTRAL_API_BASE = "https://api.mistral.ai/v1";
-    this.MISTRAL_CHAT_MODEL = "mistral-tiny";
-    this.MISTRAL_CHAT_MODELS_LIST = "";
-    this.MISTRAL_CHAT_EXTRA_PARAMS = {};
-  }
+  MISTRAL_API_KEY = null;
+  MISTRAL_API_BASE = "https://api.mistral.ai/v1";
+  MISTRAL_CHAT_MODEL = "mistral-tiny";
+  MISTRAL_CHAT_MODELS_LIST = "";
+  MISTRAL_CHAT_EXTRA_PARAMS = {};
 }
 
 class CohereConfig {
-  COHERE_API_KEY: any;
-  COHERE_API_BASE: string;
-  COHERE_CHAT_MODEL: string;
-  COHERE_CHAT_MODELS_LIST: string;
-  COHERE_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.COHERE_API_KEY = null;
-    this.COHERE_API_BASE = "https://api.cohere.com/v2";
-    this.COHERE_CHAT_MODEL = "command-r-plus";
-    this.COHERE_CHAT_MODELS_LIST = "";
-    this.COHERE_CHAT_EXTRA_PARAMS = {};
-  }
+  COHERE_API_KEY = null;
+  COHERE_API_BASE = "https://api.cohere.com/v2";
+  COHERE_CHAT_MODEL = "command-r-plus";
+  COHERE_CHAT_MODELS_LIST = "";
+  COHERE_CHAT_EXTRA_PARAMS = {};
 }
 
 class AnthropicConfig {
-  ANTHROPIC_API_KEY: any;
-  ANTHROPIC_API_BASE: string;
-  ANTHROPIC_CHAT_MODEL: string;
-  ANTHROPIC_CHAT_MODELS_LIST: string;
-  ANTHROPIC_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.ANTHROPIC_API_KEY = null;
-    this.ANTHROPIC_API_BASE = "https://api.anthropic.com/v1";
-    this.ANTHROPIC_CHAT_MODEL = "claude-3-5-haiku-latest";
-    this.ANTHROPIC_CHAT_MODELS_LIST = "";
-    this.ANTHROPIC_CHAT_EXTRA_PARAMS = {};
-  }
+  ANTHROPIC_API_KEY = null;
+  ANTHROPIC_API_BASE = "https://api.anthropic.com/v1";
+  ANTHROPIC_CHAT_MODEL = "claude-3-5-haiku-latest";
+  ANTHROPIC_CHAT_MODELS_LIST = "";
+  ANTHROPIC_CHAT_EXTRA_PARAMS = {};
 }
 
 class DeepSeekConfig {
-  DEEPSEEK_API_KEY: any;
-  DEEPSEEK_API_BASE: string;
-  DEEPSEEK_CHAT_MODEL: string;
-  DEEPSEEK_CHAT_MODELS_LIST: string;
-  DEEPSEEK_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.DEEPSEEK_API_KEY = null;
-    this.DEEPSEEK_API_BASE = "https://api.deepseek.com";
-    this.DEEPSEEK_CHAT_MODEL = "deepseek-chat";
-    this.DEEPSEEK_CHAT_MODELS_LIST = "";
-    this.DEEPSEEK_CHAT_EXTRA_PARAMS = {};
-  }
+  DEEPSEEK_API_KEY = null;
+  DEEPSEEK_API_BASE = "https://api.deepseek.com";
+  DEEPSEEK_CHAT_MODEL = "deepseek-chat";
+  DEEPSEEK_CHAT_MODELS_LIST = "";
+  DEEPSEEK_CHAT_EXTRA_PARAMS = {};
 }
 
 class GroqConfig {
-  GROQ_API_KEY: any;
-  GROQ_API_BASE: string;
-  GROQ_CHAT_MODEL: string;
-  GROQ_CHAT_MODELS_LIST: string;
-  GROQ_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.GROQ_API_KEY = null;
-    this.GROQ_API_BASE = "https://api.groq.com/openai/v1";
-    this.GROQ_CHAT_MODEL = "groq-chat";
-    this.GROQ_CHAT_MODELS_LIST = ""; // תוקן לאותיות גדולות למניעת בעיות זיהוי
-    this.GROQ_CHAT_EXTRA_PARAMS = {};
-  }
+  GROQ_API_KEY = null;
+  GROQ_API_BASE = "https://api.groq.com/openai/v1";
+  GROQ_CHAT_MODEL = "groq-chat";
+  GROQ_CHAT_MODELS_LIST = ""; // תוקן לאותיות גדולות למניעת בעיות זיהוי
+  GROQ_CHAT_EXTRA_PARAMS = {};
 }
 
 class XAIConfig {
-  XAI_API_KEY: any;
-  XAI_API_BASE: string;
-  XAI_CHAT_MODEL: string;
-  XAI_CHAT_MODELS_LIST: string;
-  XAI_CHAT_EXTRA_PARAMS: any;
-  constructor() {
-    this.XAI_API_KEY = null;
-    this.XAI_API_BASE = "https://api.x.ai/v1";
-    this.XAI_CHAT_MODEL = "grok-2-latest";
-    this.XAI_CHAT_MODELS_LIST = "";
-    this.XAI_CHAT_EXTRA_PARAMS = {};
-  }
+  XAI_API_KEY = null;
+  XAI_API_BASE = "https://api.x.ai/v1";
+  XAI_CHAT_MODEL = "grok-2-latest";
+  XAI_CHAT_MODELS_LIST = "";
+  XAI_CHAT_EXTRA_PARAMS = {};
 }
 
 class DefineKeys {
-  DEFINE_KEYS: any[];
-  constructor() {
-    this.DEFINE_KEYS = [];
-  }
+  DEFINE_KEYS: any[] = [];
 }
 
 class EnvironmentConfig {
-  LANGUAGE: string;
-  UPDATE_BRANCH: string;
-  CHAT_COMPLETE_API_TIMEOUT: number;
-  TELEGRAM_API_DOMAIN: string;
-  TELEGRAM_AVAILABLE_TOKENS: any[];
-  DEFAULT_PARSE_MODE: string;
-  TELEGRAM_MIN_STREAM_INTERVAL: number;
-  TELEGRAM_PHOTO_SIZE_OFFSET: number;
-  TELEGRAM_IMAGE_TRANSFER_MODE: string;
-  MODEL_LIST_COLUMNS: number;
-  I_AM_A_GENEROUS_PERSON: boolean;
-  CHAT_WHITE_LIST: any[];
-  LOCK_USER_CONFIG_KEYS: string[];
-  TELEGRAM_BOT_NAME: any[];
-  CHAT_GROUP_WHITE_LIST: any[];
-  GROUP_CHAT_BOT_ENABLE: boolean;
-  GROUP_CHAT_BOT_SHARE_MODE: boolean;
-  AUTO_TRIM_HISTORY: boolean;
-  MAX_HISTORY_LENGTH: number;
-  MAX_TOKEN_LENGTH: number;
-  HISTORY_IMAGE_PLACEHOLDER: any;
-  HIDE_COMMAND_BUTTONS: any[];
-  SHOW_REPLY_BUTTON: boolean;
-  EXTRA_MESSAGE_CONTEXT: boolean;
-  EXTRA_MESSAGE_MEDIA_COMPATIBLE: string[];
-  STREAM_MODE: boolean;
-  SAFE_MODE: boolean;
-  DEBUG_MODE: boolean;
-  DEV_MODE: boolean;
-  DEFAULT_NET_MODE: boolean;
-  NET_MODE_KEY_PREFIX: string;
-  constructor() {
-    this.LANGUAGE = "he"; // עברית כברירת מחדל
-    this.UPDATE_BRANCH = "master";
-    this.CHAT_COMPLETE_API_TIMEOUT = 0;
-    this.TELEGRAM_API_DOMAIN = "https://api.telegram.org";
-    this.TELEGRAM_AVAILABLE_TOKENS = [];
-    this.DEFAULT_PARSE_MODE = "Markdown";
-    this.TELEGRAM_MIN_STREAM_INTERVAL = 0;
-    this.TELEGRAM_PHOTO_SIZE_OFFSET = 1;
-    this.TELEGRAM_IMAGE_TRANSFER_MODE = "base64";
-    this.MODEL_LIST_COLUMNS = 1;
-    this.I_AM_A_GENEROUS_PERSON = false;
-    this.CHAT_WHITE_LIST = [];
-    this.LOCK_USER_CONFIG_KEYS = [
-      "OPENAI_API_BASE",
-      "GOOGLE_API_BASE",
-      "MISTRAL_API_BASE",
-      "COHERE_API_BASE",
-      "ANTHROPIC_API_BASE",
-      "DEEPSEEK_API_BASE",
-      "GROQ_API_BASE",
-      "XAI_API_BASE"
-    ];
-    this.TELEGRAM_BOT_NAME = [];
-    this.CHAT_GROUP_WHITE_LIST = [];
-    this.GROUP_CHAT_BOT_ENABLE = true;
-    this.GROUP_CHAT_BOT_SHARE_MODE = true;
-    this.AUTO_TRIM_HISTORY = true;
-    this.MAX_HISTORY_LENGTH = 8; // מגבלת זיכרון יעילה
-    this.MAX_TOKEN_LENGTH = -1;
-    this.HISTORY_IMAGE_PLACEHOLDER = null;
-    this.HIDE_COMMAND_BUTTONS = [];
-    this.SHOW_REPLY_BUTTON = false;
-    this.EXTRA_MESSAGE_CONTEXT = false;
-    this.EXTRA_MESSAGE_MEDIA_COMPATIBLE = ["image"];
-    this.STREAM_MODE = false;
-    this.SAFE_MODE = true;
-    this.DEBUG_MODE = false;
-    this.DEV_MODE = false;
+  LANGUAGE = "he"; // עברית כברירת מחדל
+  UPDATE_BRANCH = "master";
+  CHAT_COMPLETE_API_TIMEOUT = 0;
+  TELEGRAM_API_DOMAIN = "https://api.telegram.org";
+  TELEGRAM_AVAILABLE_TOKENS: any[] = [];
+  DEFAULT_PARSE_MODE = "Markdown";
+  TELEGRAM_MIN_STREAM_INTERVAL = 0;
+  TELEGRAM_PHOTO_SIZE_OFFSET = 1;
+  TELEGRAM_IMAGE_TRANSFER_MODE = "base64";
+  MODEL_LIST_COLUMNS = 1;
+  I_AM_A_GENEROUS_PERSON = false;
+  CHAT_WHITE_LIST: any[] = [];
+  LOCK_USER_CONFIG_KEYS = [
+    "OPENAI_API_BASE",
+    "GOOGLE_API_BASE",
+    "MISTRAL_API_BASE",
+    "COHERE_API_BASE",
+    "ANTHROPIC_API_BASE",
+    "DEEPSEEK_API_BASE",
+    "GROQ_API_BASE",
+    "XAI_API_BASE"
+  ];
+  TELEGRAM_BOT_NAME: any[] = [];
+  CHAT_GROUP_WHITE_LIST: any[] = [];
+  GROUP_CHAT_BOT_ENABLE = true;
+  GROUP_CHAT_BOT_SHARE_MODE = true;
+  AUTO_TRIM_HISTORY = true;
+  MAX_HISTORY_LENGTH = 8; // מגבלת זיכרון יעילה
+  MAX_TOKEN_LENGTH = -1;
+  HISTORY_IMAGE_PLACEHOLDER = null;
+  HIDE_COMMAND_BUTTONS: any[] = [];
+  SHOW_REPLY_BUTTON = false;
+  EXTRA_MESSAGE_CONTEXT = false;
+  EXTRA_MESSAGE_MEDIA_COMPATIBLE = ["image"];
+  STREAM_MODE = false;
+  SAFE_MODE = true;
+  DEBUG_MODE = false;
+  DEV_MODE = false;
 
-    // הגדרות מצב החיפוש
-    this.DEFAULT_NET_MODE = false;
-    this.NET_MODE_KEY_PREFIX = "net_mode_";
-  }
+  // הגדרות מצב החיפוש
+  DEFAULT_NET_MODE = false;
+  NET_MODE_KEY_PREFIX = "net_mode_";
 }
 
 // ==========================================
@@ -332,7 +210,7 @@ async function sendTelegramMessage(chatId: number, text: string, token: string, 
   if (replyMarkup) {
     payload.reply_markup = replyMarkup;
   }
-  
+
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -366,7 +244,7 @@ async function editTelegramMessage(chatId: number, messageId: number, text: stri
   if (replyMarkup) {
     payload.reply_markup = replyMarkup;
   }
-  
+
   let response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -401,7 +279,7 @@ function chunkButtons(buttons: any[], chunkSize: number = 2): any[][] {
 // תפריט הבית לבחירת ספק מודלים - מסונן דינמית לפי המפתחות הקיימים בסודות
 async function sendProviderMenu(chatId: number, token: string, env: Env): Promise<void> {
   const buttons: any[] = [];
-  
+
   const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
   const hasOpenAI = !!env.OPENAI_API_KEY;
   const hasCohere = !!env.COHERE_API_KEY;
@@ -428,9 +306,9 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   };
 
   await sendTelegramMessage(
-    chatId, 
-    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:", 
-    token, 
+    chatId,
+    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
+    token,
     keyboard
   );
 }
@@ -1021,7 +899,7 @@ export default {
         return new Response("OK", { status: 200 });
       }
 
-    } catch (err) {
+    } catch (err: any) {
       console.error("Worker Global Error:", err);
       return new Response("OK", { status: 200 });
     }
