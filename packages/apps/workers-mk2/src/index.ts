@@ -1,4 +1,4 @@
-// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + cohere v2 llm)
+// index.ts - קובץ מאוחד, אסינכרוני ומאובטח לבוט הטלגרם (Multi-LLM + Web Search Proxy + Inline Keyboards /models + בדיקת יתרה /balance + Cohere Command-A + NVIDIA)
 //
 // ==========================================
 // עדכוני תיקון (Fixes & Improvements):
@@ -8,14 +8,9 @@
 // 4. TypeScript interfaces
 // 5. הסרת debug logs מיותרים
 // 6. *** תיקון קריטי: מעבר מפרוטוקול MCP (JSON-RPC + handshake) לנתיב
-//    פנימי רזה POST /tools/tavily-search בשרת החיפוש. הסיבה: פרוטוקול
-//    MCP דורש הודעת "initialize" לפני כל "tools/call", וה-transport
-//    בצד השרת נוצר מחדש בכל בקשה (stateless, ללא session) - כך שאין
-//    דרך לבצע handshake תקין בין שתי בקשות HTTP נפרדות. מכיוון שזו
-//    קריאה פנימית בין שני Workers שבשליטתנו (לא לקוח MCP חיצוני אמיתי),
-//    אין סיבה לדבר את פרוטוקול ה-MCP המלא - קריאה ישירה ל-/tools/:name
-//    עם JSON פשוט (בקשה ותשובה) פותרת את זה לגמרי, וגם רזה וזולה יותר
-//    מבחינת CPU - מתאים יותר ל-Workers החינמי.
+//    פנימי רזה POST /tools/tavily-search בשרת החיפוש.
+// 7. תמיכה בספק NVIDIA עם מודלי 120B דרך NVIDIA_API_KEY.
+// 8. עדכון דגמי Cohere לדגמי Command-A החדישים (A ו-A+).
 // ==========================================
 
 type KVNamespace = any;
@@ -26,7 +21,6 @@ const CONFIG = {
   MAX_HISTORY_LENGTH: 8,
   HISTORY_TTL_SECONDS: 86400,
   DEFAULT_SYSTEM_PROMPT: "You are a helpful and professional assistant.",
-  // נתיב פנימי רזה - לא /mcp. ראו הערה למעלה.
   SEARCH_TOOL_URL: "http://searchworker/tools/tavily-search",
   KEYS_URL: "http://searchworker/api/keys",
   DEFAULT_SEARCH_DEPTH: "basic",
@@ -41,6 +35,8 @@ export interface Env {
   GOOGLE_API_KEY?: string;
   OPENAI_API_KEY?: string;
   COHERE_API_KEY?: string;
+  NVIDIA_API_KEY?: string; 
+  NVIDIA_API_BASE?: string; 
   TAVILY_PROXY_AUTH_KEY?: string;
   AI_PROVIDER?: string;
 }
@@ -63,7 +59,6 @@ interface TelegramPayload {
   message_id?: number;
 }
 
-// תשובת הנתיב הרזה /tools/tavily-search - { content: [{type, text}], isError? }
 interface ToolResponse {
   content?: Array<{ type: string; text: string }>;
   isError?: boolean;
@@ -81,7 +76,17 @@ const PROVIDERS: Record<string, ProviderInfo> = {
   },
   cohere: {
     name: "Cohere 🔮",
-    models: ["command-r-plus", "command-r", "command-r-08-2024"]
+    models: [
+      "command-a-plus-05-2026", // דגם ה-MoE החדש והמתקדם ביותר של Cohere
+      "command-a-03-2025"       // דגם Command-A היעיל
+    ]
+  },
+  nvidia: {
+    name: "NVIDIA 🟢",
+    models: [
+      "nvidia/nemotron-3-super-120b-a12b", 
+      "openai/gpt-oss-120b"                  
+    ]
   }
 };
 
@@ -146,7 +151,7 @@ class MistralConfig {
 class CohereConfig {
   COHERE_API_KEY = null;
   COHERE_API_BASE = "https://api.cohere.com/v2";
-  COHERE_CHAT_MODEL = "command-r-plus";
+  COHERE_CHAT_MODEL = "command-a-plus-05-2026"; // עודכן לברירת המחדל החדשה
   COHERE_CHAT_MODELS_LIST = "";
   COHERE_CHAT_EXTRA_PARAMS = {};
 }
@@ -183,6 +188,14 @@ class XAIConfig {
   XAI_CHAT_EXTRA_PARAMS = {};
 }
 
+class NvidiaConfig {
+  NVIDIA_API_KEY = null;
+  NVIDIA_API_BASE = "https://integrate.api.nvidia.com/v1"; 
+  NVIDIA_CHAT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+  NVIDIA_CHAT_MODELS_LIST = "";
+  NVIDIA_CHAT_EXTRA_PARAMS = {};
+}
+
 class DefineKeys {
   DEFINE_KEYS: any[] = [];
 }
@@ -208,7 +221,8 @@ class EnvironmentConfig {
     "ANTHROPIC_API_BASE",
     "DEEPSEEK_API_BASE",
     "GROQ_API_BASE",
-    "XAI_API_BASE"
+    "XAI_API_BASE",
+    "NVIDIA_API_BASE"
   ];
   TELEGRAM_BOT_NAME: any[] = [];
   CHAT_GROUP_WHITE_LIST: any[] = [];
@@ -311,6 +325,7 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
   const hasOpenAI = !!env.OPENAI_API_KEY;
   const hasCohere = !!env.COHERE_API_KEY;
+  const hasNvidia = !!env.NVIDIA_API_KEY;
 
   if (hasGemini) {
     buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
@@ -321,11 +336,15 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   if (hasCohere) {
     buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
   }
+  if (hasNvidia) {
+    buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
+  }
 
   if (buttons.length === 0) {
     buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
     buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
     buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
+    buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
   }
 
   const keyboard = {
@@ -340,11 +359,6 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   );
 }
 
-// ---------------------------------------------------------------------------
-// קריאת חיפוש רזה - קוראת ישירות ל-POST /tools/tavily-search בשרת החיפוש.
-// אין כאן פרוטוקול MCP (אין jsonrpc, אין handshake, אין SSE) - זו קריאה
-// פנימית פשוטה בין Workers, גוף JSON פשוט הלוך ושוב. ראו הערה בראש הקובץ.
-// ---------------------------------------------------------------------------
 async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
@@ -550,11 +564,58 @@ async function callCohere(systemPrompt: string, history: HistoryMessage[], env: 
   return replyText;
 }
 
+async function callNvidia(systemPrompt: string, history: HistoryMessage[], env: Env, model: string): Promise<string> {
+  const apiKey = env.NVIDIA_API_KEY;
+  if (!apiKey) {
+    throw new Error("מפתח API של NVIDIA חסר (NVIDIA_API_KEY).");
+  }
+
+  const modelConfig = new NvidiaConfig();
+  const apiBase = env.NVIDIA_API_BASE || modelConfig.NVIDIA_API_BASE;
+  const url = `${apiBase}/chat/completions`;
+  const modelName = model || modelConfig.NVIDIA_CHAT_MODEL;
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history.map((msg: HistoryMessage) => ({
+      role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user",
+      content: msg.content
+    }))
+  ];
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: modelName,
+      messages: messages,
+      temperature: 0.7
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`NVIDIA API Error: ${errorText}`);
+  }
+
+  const data: any = await response.json();
+  const replyText = data.choices?.[0]?.message?.content;
+  if (!replyText) {
+    throw new Error("לא התקבלה תשובה תקינה מ-NVIDIA.");
+  }
+  return replyText;
+}
+
 async function callLLM(systemPrompt: string, history: HistoryMessage[], env: Env, provider: string, model: string): Promise<string> {
   if (provider === "openai") {
     return await callOpenAI(systemPrompt, history, env, model);
   } else if (provider === "cohere") {
     return await callCohere(systemPrompt, history, env, model);
+  } else if (provider === "nvidia") {
+    return await callNvidia(systemPrompt, history, env, model);
   } else {
     return await callGemini(systemPrompt, history, env, model);
   }
@@ -573,7 +634,8 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
 
     let defaultModel = "gemini-2.5-flash";
     if (userProvider === "openai") defaultModel = "gpt-4o-mini";
-    if (userProvider === "cohere") defaultModel = "command-r-plus";
+    if (userProvider === "cohere") defaultModel = "command-a-plus-05-2026"; // ברירת המחדל עודכנה ל-Command-A+
+    if (userProvider === "nvidia") defaultModel = "nvidia/nemotron-3-super-120b-a12b";
 
     const userModel = (await env.DATABASE.get(`user_model_${chatId}`)) || defaultModel;
 
@@ -676,12 +738,13 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       let providerEmoji = "🤖";
       if (provider === "openai") providerEmoji = "⚡";
       if (provider === "cohere") providerEmoji = "🔮";
+      if (provider === "nvidia") providerEmoji = "🟢";
 
       const providerName = PROVIDERS[provider]?.name || provider;
       await editTelegramMessage(
         chatId,
         messageId,
-        `✅ **הגדרות המודל עודכנו בהצלחה!**\n\n` +
+        `${providerEmoji} **הגדרות המודל עודכנו בהצלחה!**\n\n` +
         `🤖 ספק מוגדר: **${providerName}**\n` +
         `🎯 מודל פעיל: \`${model}\`\n\n` +
         `מעתה, כל הודעות השיחה והחיפושים הבאים שלך ישתמשו במודל זה.`,
@@ -694,6 +757,7 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       const hasGemini = !!(env.GEMINI_API_KEY || env.GOOGLE_API_KEY);
       const hasOpenAI = !!env.OPENAI_API_KEY;
       const hasCohere = !!env.COHERE_API_KEY;
+      const hasNvidia = !!env.NVIDIA_API_KEY;
 
       if (hasGemini) {
         buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
@@ -704,11 +768,15 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
       if (hasCohere) {
         buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
       }
+      if (hasNvidia) {
+        buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
+      }
 
       if (buttons.length === 0) {
         buttons.push({ text: "Google Gemini 🤖", callback_data: "select_provider:gemini" });
         buttons.push({ text: "OpenAI ⚡", callback_data: "select_provider:openai" });
         buttons.push({ text: "Cohere 🔮", callback_data: "select_provider:cohere" });
+        buttons.push({ text: "NVIDIA 🟢", callback_data: "select_provider:nvidia" });
       }
 
       const keyboard = {
