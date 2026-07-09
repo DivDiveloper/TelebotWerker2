@@ -42,3 +42,11 @@ main = 'packages/apps/workers-mk2/dist/index.js'   # Default use of dist/index.j
 
 # TELEGRAM_AVAILABLE_TOKENS = 'token1,token2'
 # CHAT_WHITE_LIST = 'chat_id1,chat_id2'
+
+# ==========================================
+# Service Binding to Search Worker (Tavily MCP Proxy)
+# ==========================================
+[[services]]
+binding = "SEARCH_SERVICE"
+service = "searchworker"
+environment = "production"
