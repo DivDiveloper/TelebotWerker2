@@ -7,6 +7,7 @@
 // 3. ייצוא CONFIG עליון
 // 4. TypeScript interfaces
 // 5. הסרת debug logs
+// 6. Enhanced logging for MCP search debugging
 // ==========================================
 
 type KVNamespace = any;
@@ -318,7 +319,7 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
 
   await sendTelegramMessage(
     chatId,
-    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
+    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המ��דלים הזמינים שלו:",
     token,
     keyboard
   );
@@ -337,6 +338,25 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
 
   try {
     const requestId = Math.floor(Math.random() * 1000000);
+    
+    // BUILD REQUEST BODY FOR DEBUGGING
+    const requestBody = {
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: {
+        name: CONFIG.TAVILY_SEARCH_TOOL_NAME,
+        arguments: {
+          query: query,
+          search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
+          max_results: CONFIG.DEFAULT_MAX_RESULTS
+        }
+      },
+      id: requestId
+    };
+
+    console.log("[fetchWebSearch] Sending request to:", CONFIG.MCP_SERVER_URL);
+    console.log("[fetchWebSearch] Request body:", JSON.stringify(requestBody));
+    console.log("[fetchWebSearch] Auth key present:", !!authKey);
 
     const response = await searchService.fetch(CONFIG.MCP_SERVER_URL, {
       method: "POST",
@@ -345,19 +365,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
         "Accept": "application/json, text/event-stream",
         "x-api-key": authKey,
       },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        method: "tools/call",
-        params: {
-          name: CONFIG.TAVILY_SEARCH_TOOL_NAME,
-          arguments: {
-            query: query,
-            search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
-            max_results: CONFIG.DEFAULT_MAX_RESULTS
-          }
-        },
-        id: requestId
-      }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
 
@@ -365,8 +373,15 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
 
     const rawText = await response.text();
 
+    console.log("[fetchWebSearch] Response status:", response.status);
+    console.log("[fetchWebSearch] Response headers:", {
+      contentType: response.headers.get("content-type"),
+      contentLength: response.headers.get("content-length")
+    });
+    console.log("[fetchWebSearch] Response body (first 1000 chars):", rawText.slice(0, 1000));
+
     if (!response.ok) {
-      console.error(`[fetchWebSearch] HTTP ${response.status}: ${rawText.slice(0, 500)}`);
+      console.error(`[fetchWebSearch] HTTP ${response.status} Error:`, rawText);
       return `שגיאה בפנייה לשרת החיפוש: ${response.status} - ${rawText.slice(0, 500)}`;
     }
 
@@ -406,6 +421,8 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
       return "שגיאה: לא הצלחתי לחלץ נתונים מתשובת שרת החיפוש.";
     }
 
+    console.log("[fetchWebSearch] Parsed JSON payload:", JSON.stringify(jsonPayload).slice(0, 500));
+
     if (jsonPayload.error) {
       console.error("[fetchWebSearch] MCP error:", jsonPayload.error);
       return `שגיאת MCP: ${jsonPayload.error.message || JSON.stringify(jsonPayload.error)}`;
@@ -424,7 +441,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
       console.error("[fetchWebSearch] Timeout after 20s");
       return "שגיאה: החיפוש נמשך יותר מדי זמן וננטש (timeout).";
     }
-    console.error("Search failed:", error);
+    console.error("[fetchWebSearch] Exception:", error);
     return `שגיאת מערכת חריגה: ${error?.message || error}`;
   }
 }
