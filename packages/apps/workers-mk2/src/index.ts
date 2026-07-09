@@ -6,8 +6,16 @@
 // 2. תיקון incomplete systemPrompt
 // 3. ייצוא CONFIG עליון
 // 4. TypeScript interfaces
-// 5. הסרת debug logs
-// 6. Enhanced logging for MCP search debugging
+// 5. הסרת debug logs מיותרים
+// 6. *** תיקון קריטי: מעבר מפרוטוקול MCP (JSON-RPC + handshake) לנתיב
+//    פנימי רזה POST /tools/tavily-search בשרת החיפוש. הסיבה: פרוטוקול
+//    MCP דורש הודעת "initialize" לפני כל "tools/call", וה-transport
+//    בצד השרת נוצר מחדש בכל בקשה (stateless, ללא session) - כך שאין
+//    דרך לבצע handshake תקין בין שתי בקשות HTTP נפרדות. מכיוון שזו
+//    קריאה פנימית בין שני Workers שבשליטתנו (לא לקוח MCP חיצוני אמיתי),
+//    אין סיבה לדבר את פרוטוקול ה-MCP המלא - קריאה ישירה ל-/tools/:name
+//    עם JSON פשוט (בקשה ותשובה) פותרת את זה לגמרי, וגם רזה וזולה יותר
+//    מבחינת CPU - מתאים יותר ל-Workers החינמי.
 // ==========================================
 
 type KVNamespace = any;
@@ -18,9 +26,9 @@ const CONFIG = {
   MAX_HISTORY_LENGTH: 8,
   HISTORY_TTL_SECONDS: 86400,
   DEFAULT_SYSTEM_PROMPT: "You are a helpful and professional assistant.",
-  MCP_SERVER_URL: "http://searchworker/mcp",
-  MCP_KEYS_URL: "http://searchworker/api/keys",
-  TAVILY_SEARCH_TOOL_NAME: "tavily_search",
+  // נתיב פנימי רזה - לא /mcp. ראו הערה למעלה.
+  SEARCH_TOOL_URL: "http://searchworker/tools/tavily-search",
+  KEYS_URL: "http://searchworker/api/keys",
   DEFAULT_SEARCH_DEPTH: "basic",
   DEFAULT_MAX_RESULTS: 5,
 } as const;
@@ -53,6 +61,13 @@ interface TelegramPayload {
   parse_mode?: string;
   reply_markup?: any;
   message_id?: number;
+}
+
+// תשובת הנתיב הרזה /tools/tavily-search - { content: [{type, text}], isError? }
+interface ToolResponse {
+  content?: Array<{ type: string; text: string }>;
+  isError?: boolean;
+  error?: string;
 }
 
 const PROVIDERS: Record<string, ProviderInfo> = {
@@ -319,12 +334,17 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
 
   await sendTelegramMessage(
     chatId,
-    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המ��דלים הזמינים שלו:",
+    "⚙️ **תפריט הגדרות מודל**\nבחר ספק בינה מלאכותית מתוך הרשימה הבאה על מנת להציג את המודלים הזמינים שלו:",
     token,
     keyboard
   );
 }
 
+// ---------------------------------------------------------------------------
+// קריאת חיפוש רזה - קוראת ישירות ל-POST /tools/tavily-search בשרת החיפוש.
+// אין כאן פרוטוקול MCP (אין jsonrpc, אין handshake, אין SSE) - זו קריאה
+// פנימית פשוטה בין Workers, גוף JSON פשוט הלוך ושוב. ראו הערה בראש הקובץ.
+// ---------------------------------------------------------------------------
 async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const searchService = env.SEARCH_SERVICE;
   if (!searchService) {
@@ -337,35 +357,17 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const timeoutId = setTimeout(() => controller.abort(), CONFIG.SEARCH_TIMEOUT_MS);
 
   try {
-    const requestId = Math.floor(Math.random() * 1000000);
-    
-    // BUILD REQUEST BODY FOR DEBUGGING
-    const requestBody = {
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: {
-        name: CONFIG.TAVILY_SEARCH_TOOL_NAME,
-        arguments: {
-          query: query,
-          search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
-          max_results: CONFIG.DEFAULT_MAX_RESULTS
-        }
-      },
-      id: requestId
-    };
-
-    console.log("[fetchWebSearch] Sending request to:", CONFIG.MCP_SERVER_URL);
-    console.log("[fetchWebSearch] Request body:", JSON.stringify(requestBody));
-    console.log("[fetchWebSearch] Auth key present:", !!authKey);
-
-    const response = await searchService.fetch(CONFIG.MCP_SERVER_URL, {
+    const response = await searchService.fetch(CONFIG.SEARCH_TOOL_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
         "x-api-key": authKey,
       },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({
+        query: query,
+        search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
+        max_results: CONFIG.DEFAULT_MAX_RESULTS,
+      }),
       signal: controller.signal,
     });
 
@@ -373,65 +375,24 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
 
     const rawText = await response.text();
 
-    console.log("[fetchWebSearch] Response status:", response.status);
-    console.log("[fetchWebSearch] Response headers:", {
-      contentType: response.headers.get("content-type"),
-      contentLength: response.headers.get("content-length")
-    });
-    console.log("[fetchWebSearch] Response body (first 1000 chars):", rawText.slice(0, 1000));
-
     if (!response.ok) {
-      console.error(`[fetchWebSearch] HTTP ${response.status} Error:`, rawText);
+      console.error(`[fetchWebSearch] HTTP ${response.status}: ${rawText.slice(0, 500)}`);
       return `שגיאה בפנייה לשרת החיפוש: ${response.status} - ${rawText.slice(0, 500)}`;
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    let jsonPayload = null;
-
-    if (contentType.includes("application/json")) {
-      try {
-        jsonPayload = JSON.parse(rawText);
-      } catch (e) {
-        return `שגיאה: לא ניתן לפענח תשובת JSON מהשרת: ${rawText.slice(0, 300)}`;
-      }
-    } else if (contentType.includes("text/event-stream")) {
-      const lines = rawText.split("\n");
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("data: ")) {
-          const dataStr = trimmed.slice(6).trim();
-          if (dataStr === "[DONE]") continue;
-          try {
-            jsonPayload = JSON.parse(dataStr);
-          } catch (_) {
-            // התעלמות משורות חלקיות
-          }
-        }
-      }
-    } else {
-      try {
-        jsonPayload = JSON.parse(rawText);
-      } catch {
-        console.error(`[fetchWebSearch] Unexpected content-type "${contentType}": ${rawText.slice(0, 300)}`);
-        return `שגיאה: תשובה לא צפויה מהשרת (content-type: ${contentType}).`;
-      }
+    let payload: ToolResponse;
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      console.error(`[fetchWebSearch] Non-JSON response: ${rawText.slice(0, 300)}`);
+      return `שגיאה: תשובה לא תקינה מהשרת: ${rawText.slice(0, 300)}`;
     }
 
-    if (!jsonPayload) {
-      return "שגיאה: לא הצלחתי לחלץ נתונים מתשובת שרת החיפוש.";
-    }
+    const textResult = payload.content?.[0]?.text;
 
-    console.log("[fetchWebSearch] Parsed JSON payload:", JSON.stringify(jsonPayload).slice(0, 500));
-
-    if (jsonPayload.error) {
-      console.error("[fetchWebSearch] MCP error:", jsonPayload.error);
-      return `שגיאת MCP: ${jsonPayload.error.message || JSON.stringify(jsonPayload.error)}`;
-    }
-
-    const textResult = jsonPayload.result?.content?.[0]?.text;
-
-    if (jsonPayload.result?.isError) {
-      return `שגיאת כלי חיפוש: ${textResult || "unknown error"}`;
+    if (payload.isError) {
+      console.error("[fetchWebSearch] Tool error:", textResult || payload.error);
+      return `שגיאת כלי חיפוש: ${textResult || payload.error || "unknown error"}`;
     }
 
     return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
@@ -836,7 +797,7 @@ export default {
             return new Response("OK", { status: 200 });
           }
 
-          const res = await searchService.fetch(CONFIG.MCP_KEYS_URL, {
+          const res = await searchService.fetch(CONFIG.KEYS_URL, {
             headers: { "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" }
           });
 
