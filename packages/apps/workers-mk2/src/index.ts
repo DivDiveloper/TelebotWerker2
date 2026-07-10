@@ -364,20 +364,24 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
     return "שגיאה פנימית: שירות החיפוש אינו מחובר (Service Binding חסר).";
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CONFIG.SEARCH_TIMEOUT_MS);
+
   try {
-    const response = await fetchWithTimeout(
-      CONFIG.SEARCH_TOOL_URL,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" },
-        body: JSON.stringify({
-          query,
-          search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
-          max_results: CONFIG.DEFAULT_MAX_RESULTS,
-        }),
-      },
-      CONFIG.SEARCH_TIMEOUT_MS
-    );
+    // חייב להשתמש ב-searchService.fetch (ה-Service Binding עצמו), לא ב-fetch()
+    // הגלובלי - אחרת הבקשה יוצאת לאינטרנט האמיתי במקום להיות מנותבת פנימית
+    // ישירות לוורקר השני, ונתקלת בשגיאת Cloudflare edge (403 / error 1003).
+    const response = await searchService.fetch(CONFIG.SEARCH_TOOL_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" },
+      body: JSON.stringify({
+        query,
+        search_depth: CONFIG.DEFAULT_SEARCH_DEPTH,
+        max_results: CONFIG.DEFAULT_MAX_RESULTS,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errBody = await response.text();
@@ -395,6 +399,7 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
 
     return textResult || "לא נמצאו תוצאות חיפוש רלוונטיות.";
   } catch (error: any) {
+    clearTimeout(timeoutId);
     if (error?.name === "AbortError") {
       return "שגיאה: החיפוש נמשך יותר מדי זמן וננטש (timeout).";
     }
