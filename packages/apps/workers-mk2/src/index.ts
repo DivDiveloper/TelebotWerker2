@@ -37,6 +37,7 @@ const CONFIG = {
   KEYS_URL: "http://searchworker/api/keys",
   DEFAULT_SEARCH_DEPTH: "basic",
   DEFAULT_MAX_RESULTS: 5,
+  MAX_SEARCH_CONTEXT_CHARS: 4000,
   SETTINGS_KEY_PREFIX: "settings:",
   HISTORY_KEY_PREFIX: "history_",
   MODELS_CACHE_KEY: "models_cache",
@@ -52,6 +53,7 @@ export interface Env {
   GOOGLE_API_KEY?: string;
   OPENAI_API_KEY?: string;
   COHERE_API_KEY?: string;
+  NVIDIA_API_KEY?: string;
   TAVILY_PROXY_AUTH_KEY?: string;
   AI_PROVIDER?: string;
 }
@@ -97,18 +99,25 @@ const PROVIDER_LABELS: Record<string, string> = {
   gemini: "Google Gemini 🤖",
   openai: "OpenAI ⚡",
   cohere: "Cohere 🔮",
+  nvidia: "NVIDIA NIM 🟢",
 };
 
 const PROVIDER_DEFAULTS = {
   gemini: { apiBase: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-2.5-flash" },
   openai: { apiBase: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
   cohere: { apiBase: "https://api.cohere.com/v2", defaultModel: "command-r-plus" },
+  nvidia: { apiBase: "https://integrate.api.nvidia.com/v1", defaultModel: "meta/llama-3.1-70b-instruct" },
 } as const;
 
 const FALLBACK_MODELS: Record<string, string[]> = {
   gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
   cohere: ["command-r-plus", "command-r", "command-r-08-2024"],
+  // NVIDIA's /v1/models has no reliable "supports chat" flag (confirmed via
+  // live probing by third parties), so unlike the other providers this list
+  // is NOT auto-refreshed by updateModelsJob - it stays static/curated to
+  // avoid polluting the menu with embedding/vision/retired models.
+  nvidia: ["meta/llama-3.1-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1", "mistralai/mixtral-8x22b-instruct-v0.1"],
 };
 
 // =============================================================================
@@ -338,6 +347,7 @@ async function sendProviderMenu(chatId: number, token: string, env: Env): Promis
   if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) buttons.push({ text: PROVIDER_LABELS.gemini, callback_data: "select_provider:gemini" });
   if (env.OPENAI_API_KEY) buttons.push({ text: PROVIDER_LABELS.openai, callback_data: "select_provider:openai" });
   if (env.COHERE_API_KEY) buttons.push({ text: PROVIDER_LABELS.cohere, callback_data: "select_provider:cohere" });
+  if (env.NVIDIA_API_KEY) buttons.push({ text: PROVIDER_LABELS.nvidia, callback_data: "select_provider:nvidia" });
 
   if (buttons.length === 0) {
     for (const key of Object.keys(PROVIDER_LABELS)) {
@@ -454,6 +464,28 @@ async function callOpenAI(systemPrompt: string, history: HistoryMessage[], apiKe
   return replyText;
 }
 
+// NVIDIA NIM exposes a fully OpenAI-compatible /v1/chat/completions endpoint
+// (https://integrate.api.nvidia.com/v1), so the request/response shape is
+// identical to callOpenAI - only the base URL and key differ.
+async function callNvidia(systemPrompt: string, history: HistoryMessage[], apiKey: string, model: string): Promise<string> {
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history.map((msg) => ({ role: msg.role === "assistant" || msg.role === "model" ? "assistant" : "user", content: msg.content })),
+  ];
+
+  const response = await fetch(`${PROVIDER_DEFAULTS.nvidia.apiBase}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages, temperature: 0.7 }),
+  });
+
+  if (!response.ok) throw new Error(`NVIDIA API Error: ${await response.text()}`);
+  const data: any = await response.json();
+  const replyText = data.choices?.[0]?.message?.content;
+  if (!replyText) throw new Error("לא התקבלה תשובה תקינה מ-NVIDIA.");
+  return replyText;
+}
+
 async function callCohere(systemPrompt: string, history: HistoryMessage[], apiKey: string, model: string): Promise<string> {
   const messages = [
     { role: "system", content: systemPrompt },
@@ -483,6 +515,10 @@ async function callLLM(systemPrompt: string, history: HistoryMessage[], env: Env
   if (provider === "cohere") {
     if (!env.COHERE_API_KEY) throw new Error("מפתח API של Cohere חסר (COHERE_API_KEY).");
     return callCohere(systemPrompt, history, env.COHERE_API_KEY, model);
+  }
+  if (provider === "nvidia") {
+    if (!env.NVIDIA_API_KEY) throw new Error("מפתח API של NVIDIA חסר (NVIDIA_API_KEY).");
+    return callNvidia(systemPrompt, history, env.NVIDIA_API_KEY, model);
   }
   const geminiKey = env.GEMINI_API_KEY || env.GOOGLE_API_KEY;
   if (!geminiKey) throw new Error("מפתח API של Gemini חסר (GEMINI_API_KEY).");
@@ -524,23 +560,47 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
 
     let systemPrompt = CONFIG.DEFAULT_SYSTEM_PROMPT;
     if (settings.netOn && searchResults) {
-      systemPrompt += `\n\n[USER SEARCH CONTEXT]\nלהלן מידע עדכני שנמצא ברשת לגבי שאלת המשתמש. השתמש בו כדי לענות בצורה מבוססת ומדויקת:\n\n${searchResults}`;
+      // Cap injected context length - an oversized search result can push
+      // the provider (especially Cohere) into a generation failure.
+      const trimmedResults = searchResults.length > CONFIG.MAX_SEARCH_CONTEXT_CHARS
+        ? `${searchResults.slice(0, CONFIG.MAX_SEARCH_CONTEXT_CHARS)}...`
+        : searchResults;
+      systemPrompt += `\n\n[USER SEARCH CONTEXT]\nלהלן מידע עדכני שנמצא ברשת לגבי שאלת המשתמש. השתמש בו כדי לענות בצורה מבוססת ומדויקת:\n\n${trimmedResults}`;
     }
 
     let botReply: string;
+    let replySucceeded = true;
     try {
       botReply = await callLLM(systemPrompt, history, env, settings.provider, settings.model);
     } catch (error: any) {
       console.error("LLM Call Error:", error);
-      botReply = `מצטער, חלה שגיאה בעיבוד התשובה: ${error.message}`;
+      // Cohere occasionally fails generation on a perfectly valid request
+      // (NO_VALID_RESPONSE_GENERATED, transient) - one retry usually
+      // succeeds. Only retried for Cohere, only once.
+      if (settings.provider === "cohere" && /NO_VALID_RESPONSE_GENERATED|No valid response generated/i.test(error?.message || "")) {
+        try {
+          botReply = await callLLM(systemPrompt, history, env, settings.provider, settings.model);
+        } catch (retryError: any) {
+          console.error("LLM Retry Error:", retryError);
+          botReply = `מצטער, חלה שגיאה בעיבוד התשובה. נסה שוב או החלף מודל דרך /models.`;
+          replySucceeded = false;
+        }
+      } else {
+        botReply = `מצטער, חלה שגיאה בעיבוד התשובה: ${error.message}`;
+        replySucceeded = false;
+      }
     }
 
-    history.push({ role: "model", content: botReply });
-    if (history.length > CONFIG.MAX_HISTORY_LENGTH) {
-      history = history.slice(history.length - CONFIG.MAX_HISTORY_LENGTH);
+    // Only persist genuinely successful replies to history - saving error
+    // text as if it were a real assistant turn corrupts future context and
+    // can itself trigger further generation failures downstream.
+    if (replySucceeded) {
+      history.push({ role: "model", content: botReply });
+      if (history.length > CONFIG.MAX_HISTORY_LENGTH) {
+        history = history.slice(history.length - CONFIG.MAX_HISTORY_LENGTH);
+      }
+      await env.DATABASE.put(`${CONFIG.HISTORY_KEY_PREFIX}${chatId}`, JSON.stringify(history), { expirationTtl: CONFIG.HISTORY_TTL_SECONDS });
     }
-
-    await env.DATABASE.put(`${CONFIG.HISTORY_KEY_PREFIX}${chatId}`, JSON.stringify(history), { expirationTtl: CONFIG.HISTORY_TTL_SECONDS });
 
     if (settings.netOn && tempMessageId) {
       await editTelegramMessage(chatId, tempMessageId, botReply, token);
@@ -611,6 +671,7 @@ async function sendProviderMenuInline(chatId: number, messageId: number, token: 
   if (env.GEMINI_API_KEY || env.GOOGLE_API_KEY) buttons.push({ text: PROVIDER_LABELS.gemini, callback_data: "select_provider:gemini" });
   if (env.OPENAI_API_KEY) buttons.push({ text: PROVIDER_LABELS.openai, callback_data: "select_provider:openai" });
   if (env.COHERE_API_KEY) buttons.push({ text: PROVIDER_LABELS.cohere, callback_data: "select_provider:cohere" });
+  if (env.NVIDIA_API_KEY) buttons.push({ text: PROVIDER_LABELS.nvidia, callback_data: "select_provider:nvidia" });
 
   if (buttons.length === 0) {
     for (const key of Object.keys(PROVIDER_LABELS)) {
