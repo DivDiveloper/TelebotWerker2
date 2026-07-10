@@ -23,6 +23,7 @@
 //    key (`models_cache`). Refreshed only on explicit /updatemodels command
 //    or on the optional scheduled() Cron Trigger - never on the per-message
 //    hot path, so it adds zero background load to normal chat traffic.
+// 5. Updated Cohere to Command-A modern series and NVIDIA default to 120B model.
 // ==========================================
 
 type KVNamespace = any;
@@ -87,6 +88,7 @@ interface ModelsCache {
   gemini?: string[];
   openai?: string[];
   cohere?: string[];
+  nvidia?: string[];
   updatedAt?: number;
 }
 
@@ -105,19 +107,24 @@ const PROVIDER_LABELS: Record<string, string> = {
 const PROVIDER_DEFAULTS = {
   gemini: { apiBase: "https://generativelanguage.googleapis.com/v1beta", defaultModel: "gemini-2.5-flash" },
   openai: { apiBase: "https://api.openai.com/v1", defaultModel: "gpt-4o-mini" },
-  cohere: { apiBase: "https://api.cohere.com/v2", defaultModel: "command-r-plus" },
-  nvidia: { apiBase: "https://integrate.api.nvidia.com/v1", defaultModel: "meta/llama-3.1-70b-instruct" },
+  cohere: { apiBase: "https://api.cohere.com/v2", defaultModel: "command-a-plus-05-2026" }, // עודכן ל-Command-A+
+  nvidia: { apiBase: "https://integrate.api.nvidia.com/v1", defaultModel: "nvidia/nemotron-3-super-120b-a12b" }, // עודכן למודל 120B
 } as const;
 
 const FALLBACK_MODELS: Record<string, string[]> = {
   gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
-  cohere: ["command-r-plus", "command-r", "command-r-08-2024"],
+  cohere: ["command-a-plus-05-2026", "command-a-03-2025"], // עודכן ל-Command-A החדישים
   // NVIDIA's /v1/models has no reliable "supports chat" flag (confirmed via
   // live probing by third parties), so unlike the other providers this list
   // is NOT auto-refreshed by updateModelsJob - it stays static/curated to
   // avoid polluting the menu with embedding/vision/retired models.
-  nvidia: ["meta/llama-3.1-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1", "mistralai/mixtral-8x22b-instruct-v0.1"],
+  nvidia: [
+    "nvidia/nemotron-3-super-120b-a12b", // דגם ה-120B המוביל
+    "meta/llama-3.1-70b-instruct", 
+    "nvidia/llama-3.3-nemotron-super-49b-v1", 
+    "mistralai/mixtral-8x22b-instruct-v0.1"
+  ],
 };
 
 // =============================================================================
@@ -222,6 +229,7 @@ async function getProviderModels(env: Env): Promise<Record<string, string[]>> {
     gemini: cache.gemini?.length ? cache.gemini : FALLBACK_MODELS.gemini,
     openai: cache.openai?.length ? cache.openai : FALLBACK_MODELS.openai,
     cohere: cache.cohere?.length ? cache.cohere : FALLBACK_MODELS.cohere,
+    nvidia: cache.nvidia?.length ? cache.nvidia : FALLBACK_MODELS.nvidia, // תמיכה במילוט של NVIDIA
   };
 }
 
@@ -378,9 +386,6 @@ async function fetchWebSearch(query: string, env: Env): Promise<string> {
   const timeoutId = setTimeout(() => controller.abort(), CONFIG.SEARCH_TIMEOUT_MS);
 
   try {
-    // חייב להשתמש ב-searchService.fetch (ה-Service Binding עצמו), לא ב-fetch()
-    // הגלובלי - אחרת הבקשה יוצאת לאינטרנט האמיתי במקום להיות מנותבת פנימית
-    // ישירות לוורקר השני, ונתקלת בשגיאת Cloudflare edge (403 / error 1003).
     const response = await searchService.fetch(CONFIG.SEARCH_TOOL_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": env.TAVILY_PROXY_AUTH_KEY || "" },
@@ -465,8 +470,6 @@ async function callOpenAI(systemPrompt: string, history: HistoryMessage[], apiKe
 }
 
 // NVIDIA NIM exposes a fully OpenAI-compatible /v1/chat/completions endpoint
-// (https://integrate.api.nvidia.com/v1), so the request/response shape is
-// identical to callOpenAI - only the base URL and key differ.
 async function callNvidia(systemPrompt: string, history: HistoryMessage[], apiKey: string, model: string): Promise<string> {
   const messages = [
     { role: "system", content: systemPrompt },
@@ -526,15 +529,13 @@ async function callLLM(systemPrompt: string, history: HistoryMessage[], env: Env
 }
 
 // =============================================================================
-// Background message handler (runs inside ctx.waitUntil - exactly one task
-// per incoming message, no parallel background work spawned).
+// Background message handler
 // =============================================================================
 async function handleMessageAndReply(chatId: number, text: string, env: Env): Promise<void> {
   const token = env.TELEGRAM_BOT_TOKEN || "";
   if (!token) return;
 
   try {
-    // Single KV read for provider + model + net-search-mode (was 3 reads).
     const settings = await getSettings(env, chatId);
 
     let searchResults = "";
@@ -560,8 +561,6 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
 
     let systemPrompt = CONFIG.DEFAULT_SYSTEM_PROMPT;
     if (settings.netOn && searchResults) {
-      // Cap injected context length - an oversized search result can push
-      // the provider (especially Cohere) into a generation failure.
       const trimmedResults = searchResults.length > CONFIG.MAX_SEARCH_CONTEXT_CHARS
         ? `${searchResults.slice(0, CONFIG.MAX_SEARCH_CONTEXT_CHARS)}...`
         : searchResults;
@@ -574,9 +573,6 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
       botReply = await callLLM(systemPrompt, history, env, settings.provider, settings.model);
     } catch (error: any) {
       console.error("LLM Call Error:", error);
-      // Cohere occasionally fails generation on a perfectly valid request
-      // (NO_VALID_RESPONSE_GENERATED, transient) - one retry usually
-      // succeeds. Only retried for Cohere, only once.
       if (settings.provider === "cohere" && /NO_VALID_RESPONSE_GENERATED|No valid response generated/i.test(error?.message || "")) {
         try {
           botReply = await callLLM(systemPrompt, history, env, settings.provider, settings.model);
@@ -591,9 +587,6 @@ async function handleMessageAndReply(chatId: number, text: string, env: Env): Pr
       }
     }
 
-    // Only persist genuinely successful replies to history - saving error
-    // text as if it were a real assistant turn corrupts future context and
-    // can itself trigger further generation failures downstream.
     if (replySucceeded) {
       history.push({ role: "model", content: botReply });
       if (history.length > CONFIG.MAX_HISTORY_LENGTH) {
@@ -621,7 +614,6 @@ async function handleCallbackQuery(callbackQuery: any, env: Env): Promise<void> 
   const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data || "";
 
-  // Acknowledge immediately to clear the Telegram loading spinner.
   await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -754,9 +746,6 @@ export default {
           }
 
           case "/updatemodels": {
-            // Runs inline (not via waitUntil) since the user is waiting for
-            // a direct status reply; it's an explicit, infrequent command,
-            // not hot-path traffic.
             const status = await updateModelsJob(env);
             await sendTelegramMessage(chatId, `🔄 **עדכון רשימת מודלים**\n\n${status}`, token);
             return new Response("OK", { status: 200 });
@@ -799,12 +788,6 @@ export default {
     return new Response("OK", { status: 200 });
   },
 
-  // Optional Cron Trigger handler for fully automatic model-list refresh.
-  // Add to wrangler.toml to enable, e.g.:
-  //   [triggers]
-  //   crons = ["0 3 * * *"]   # daily at 03:00 UTC
-  // This runs as its own isolated invocation - it never touches the
-  // per-message hot path or its CPU/subrequest budget.
   async scheduled(_event: any, env: Env, ctx: any): Promise<void> {
     ctx.waitUntil(updateModelsJob(env));
   },
